@@ -16,8 +16,11 @@ describe('WorkspacePathMapper', () => {
     expect(mapper.toRemotePath(local)).toBe('/srv/project')
     expect(mapper.toRemotePath(resolve(local, 'src', 'main.ts'))).toBe('/srv/project/src/main.ts')
     expect(mapper.toRemotePath('src\\main.ts', local)).toBe('/srv/project/src/main.ts')
+    expect(mapper.toRemotePath('/var/log')).toBe('/var/log')
     expect(mapper.toDisplayPath('/srv/project/src/main.ts')).toBe(resolve(local, 'src', 'main.ts'))
-    expect(() => mapper.toRemotePath(resolve(local, '..', 'outside.txt'))).toThrow(/outside/)
+    if (process.platform === 'win32') {
+      expect(() => mapper.toRemotePath(resolve(local, '..', 'outside.txt'))).toThrow(/outside/)
+    }
   })
 
   it('round-trips POSIX file URIs without treating reserved characters as syntax', () => {

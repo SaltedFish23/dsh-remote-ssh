@@ -95,7 +95,6 @@ export class WorkspacePathMapper {
   toRemotePath(input: string, cwd?: string): string {
     if (input.trim().length === 0) throw new Error('path must be a non-empty string')
     if (input.startsWith('file:')) return posixPathFromFileUri(input)
-    if (input.startsWith('/')) return posix.normalize(input)
 
     const localAbsolute = isAbsolute(input)
     if (localAbsolute) {
@@ -103,8 +102,14 @@ export class WorkspacePathMapper {
       if (rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))) {
         return posix.resolve(this.remoteWorkspace, rel.split(sep).join('/'))
       }
+      // On POSIX, local and remote absolute paths share the same syntax. Paths
+      // outside the alias are therefore remote; Windows local paths remain
+      // distinguishable and must not escape the alias.
+      if (input.startsWith('/')) return posix.normalize(input)
       throw new Error(`local path is outside the Remote SSH workspace alias: ${input}`)
     }
+
+    if (input.startsWith('/')) return posix.normalize(input)
 
     const base = cwd === undefined ? this.remoteWorkspace : this.toRemotePath(cwd)
     return posix.resolve(base, input.replaceAll('\\', '/'))
