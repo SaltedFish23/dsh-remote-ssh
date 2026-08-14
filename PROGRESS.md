@@ -27,7 +27,7 @@
 - 隔离原有本地 fs/subprocess，桥接为 private provider；
 - 根 `ctx.fs` 由 `TransparentFileSystem` 路由；
 - 根 `ctx.subprocess` 由 `TransparentSubprocessRuntime` 路由；
-- bash/pwsh 工具不提供 remote 工具；远端前后台任务复用 host AHP Terminal；
+- bash/pwsh 工具不提供 remote 工具；Remote Bash 每个 Agent 复用一个持久 AHP Terminal；
 - 内置 glob/grep 复用 routed subprocess，因此远端调用远端 `rg`；
 - 前台、后台、stdout/stderr、exit code 均按 cwd 所属 workspace 选择执行主机；
 - 远端失败不会回退 local。
@@ -51,8 +51,10 @@
 - 本机绝对 `.exe` 路径远端化时只用 basename，让 remote PATH 重新解析；
 - stdout/stderr 独立收集，支持 pipe/inherit/bounded tail；
 - remote interactive terminal 使用 AHP createTerminal/Input/Data；
-- bash/pwsh dialect 继续使用原 DSH tool 接口；
-- bash/pwsh executor 与 tool 使用四个全局唯一的 Loader ID，避免嵌套 group 子项互相搬移覆盖；Windows Host 上的远端 Agent 也会同时获得普通 `bash`、`pwsh` 工具；
+- Remote Bash 直接组合 Harness 的 `dsh-terminal`、`dsh-terminal-bash` 与 `dsh-tool-bash-persistent`；底层 routed `spawnTerminal()` 选择 AHP PTY；
+- 每个 Agent 的 cwd、环境变量、激活环境、函数和后台 shell 状态跨 `bash` 调用保留；调用按 owner 串行，Agent dispose 时等待 PTY 回收；
+- bash 命令通过 TerminalInput 直接进入持久 shell，每次调用不再生成远端 `command-*.sh` Resource；
+- Agent policy 按工作区裁剪为 POSIX Remote 的 `bash` 或 Windows LOCAL 的 `pwsh`；远端 presenter 将内部 UUID alias 投影为 `<Server> > <workspace>`；
 - restrictive sandbox mode 明确失败；
 - AHP Terminal shell 已修复为 RS/US marker framing，不依赖远端 command-detection events。
 - OpenSSH 只承担 host bootstrap/tunnel；POSIX 可用 ControlMaster 合并启动连接，Windows 禁用不可靠 multiplex，但两者均无逐命令 SSH。
@@ -107,7 +109,7 @@
 - multi-workspace routing、invalid server 与 tombstone；
 - TypeScript node/client build。
 
-最终数量以本次结尾的 `vitest` 输出为准（当前为 7 个 test files、25 个 tests）。SSH config 和远端目录测试只使用临时文件、合成别名和 RFC 文档地址，不读取或复制开发机配置。
+最终数量以本次结尾的 `vitest` 输出为准（当前为 8 个 test files、30 个 tests）。SSH config 和远端目录测试只使用临时文件、合成别名和 RFC 文档地址，不读取或复制开发机配置。
 
 ### Laptop AHP 集成
 
@@ -138,7 +140,9 @@ seed.txt:  laptop-seed\n
 - `subprocessSshFallbacks` 为 0，ignore/fixed/live-stdin subprocess 都走 AHP；
 - live stdin 的中英文分块、EOF、SIGTERM 取消和 FIFO 无残留均已验证；
 - `ctx.shell` 输出 `shell-host=Laptop`；
-- 真实 Web profile 的 Laptop 工作区 Agent 工具目录同时包含 `bash`、`pwsh`，其中 `bash` 返回 `bash-host=Laptop`；远端缺少 `pwsh` 时返回远端 exit 127，不会借用本机安装；
+- 真实 Web profile 的 Laptop 工作区 Agent 工具目录只包含 `bash`，Windows LOCAL Agent 只包含 `pwsh`；
+- Laptop 同一 Agent 连续两次 `bash` 调用只创建一个 AHP Terminal：第一次 `cd /home/yan/bot/coffee` 并 `export`，第二次得到相同 cwd 与环境变量；
+- 实机观测 `command-*.sh` Resource 写入为 0；terminal presenter 返回 `/Laptop-Yan > bot`，不显示 alias UUID；
 - 两个 Laptop workspace 的 `sharedHostRuntime` 为 `true`；
 - AHP interactive terminal 返回 Laptop hostname 与 exit code 6；
 - 同一个 `ctx.fs` 在 local cwd 读取本插件 `package.json`。
@@ -149,6 +153,7 @@ seed.txt:  laptop-seed\n
 - `src/router-fs.ts`：透明 local/remote filesystem；
 - `src/router-subprocess.ts`：透明 local/remote subprocess 与 terminal；
 - `src/shell-transparent.ts`：bash/pwsh dialect；
+- `src/agent-policy.ts`：Session execution-world 绑定、workspace shell 裁剪与 terminal cwd 投影；
 - `src/index.ts`：SSH/AHP bootstrap 与 path mapper；
 - `src/fs.ts`、`src/shell.ts`：AHP fs/terminal；
 - `src/web.ts`、`src/client/index.tsx`：Settings API 与 Web UI；

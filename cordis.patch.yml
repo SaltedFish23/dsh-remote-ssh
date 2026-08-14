@@ -66,22 +66,24 @@
         dialect: !!js >-
           process.platform === 'win32' ? 'pwsh' : 'bash'
 
-    # Each dialect receives a private `shell` realm while both contribute their
-    # existing ordinary tool names to the global tool catalog.
+    # Remote Bash is a persistent, Agent-owned PTY. The existing Harness
+    # terminal stack consumes routed subprocess.spawnTerminal(), which becomes
+    # an AHP createTerminal call for a Remote workspace and a local PTY for a
+    # local POSIX workspace. No per-command remote script is materialized.
     - id: remote-ssh-bash
       name: cordis:group
       group: true
-      isolate:
-        shell: true
       config:
-        - id: remote-ssh-bash-executor
-          name: dsh-remote-ssh/shell-transparent
-          inject: [subprocess, remoteSshManager]
+        - id: remote-ssh-terminal-registry
+          name: '@deepseek-ai/dsh-terminal'
+        - id: remote-ssh-terminal-bash
+          name: '@deepseek-ai/dsh-terminal-bash'
+          inject: [terminals, sandboxPolicy, subprocess]
           config:
-            dialect: bash
+            shellPath: bash
         - id: remote-ssh-bash-tool
-          name: '@deepseek-ai/dsh-tool-bash'
-          inject: [tools, shell, systemPrompt, shellEnv]
+          name: '@deepseek-ai/dsh-tool-bash-persistent'
+          inject: [tools, terminals]
 
     - id: remote-ssh-pwsh
       name: cordis:group
@@ -99,7 +101,7 @@
           inject: [tools, shell, systemPrompt, shellEnv]
 
     # Shell names remain ordinary, but each Agent sees only the dialect of its
-    # workspace OS. This also binds explicit workdir calls to the Agent's host.
+    # workspace OS. Remote Bash state is scoped to that exact live Agent.
     - id: remote-ssh-agent-policy
       name: dsh-remote-ssh/agent-policy
       inject: [remoteSshManager, tools]

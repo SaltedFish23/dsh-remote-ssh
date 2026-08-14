@@ -53,6 +53,78 @@ describe('RemoteSshManager', () => {
     }
   })
 
+  it('keeps explicit POSIX workdirs in the session-bound remote world', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-remote-ssh-manager-'))
+    const ctx = await createContext()
+    try {
+      await ctx.plugin(RemoteSshManager, {
+        aliasRoot: root,
+        servers: [{ id: 'devbox', label: 'Devbox', sshTarget: 'test-devbox' }],
+        workspaces: [{ id: 'project', serverId: 'devbox', remotePath: '/srv/project' }],
+      })
+      const manager = ctx.remoteSshManager
+      const owner = {}
+      manager.bindSession('remote-session', owner, resolve(root, 'project'))
+
+      expect(manager.routeShell('/srv/project/coffee', 'remote-session')).toMatchObject({
+        kind: 'remote',
+        workspace: { id: 'project' },
+      })
+      expect(manager.route(undefined, '/srv/project/coffee')).toMatchObject({
+        kind: 'remote',
+        workspace: { id: 'project' },
+      })
+
+      const otherOwner = {}
+      manager.unbindSession('remote-session', otherOwner)
+      expect(manager.routeShell('/outside', 'remote-session')).toMatchObject({ kind: 'remote' })
+      manager.unbindSession('remote-session', owner)
+      expect(manager.routeShell('/outside', 'remote-session')).toEqual({ kind: 'local' })
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('does not let a remote-looking workdir escape a session-bound local world', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-remote-ssh-manager-'))
+    const ctx = await createContext()
+    try {
+      await ctx.plugin(RemoteSshManager, {
+        aliasRoot: root,
+        servers: [{ id: 'devbox', label: 'Devbox', sshTarget: 'test-devbox' }],
+        workspaces: [{ id: 'project', serverId: 'devbox', remotePath: '/srv/project' }],
+      })
+      const manager = ctx.remoteSshManager
+      manager.bindSession('local-session', {}, resolve(root, '..', 'local'))
+      expect(manager.routeShell('/srv/project', 'local-session')).toEqual({ kind: 'local' })
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('renders logical remote cwd labels without exposing the alias directory', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-remote-ssh-manager-'))
+    const ctx = await createContext()
+    try {
+      await ctx.plugin(RemoteSshManager, {
+        aliasRoot: root,
+        servers: [{ id: 'devbox', label: 'Devbox', sshTarget: 'test-devbox' }],
+        workspaces: [{ id: 'project', serverId: 'devbox', remotePath: '/srv/project' }],
+      })
+      const manager = ctx.remoteSshManager
+      const route = manager.workspace('project')
+      expect(manager.displayRemoteCwd(route)).toBe('/Devbox > project')
+      expect(manager.displayRemoteCwd(route, '/srv/project/coffee')).toBe('/Devbox > project/coffee')
+      expect(manager.displayRemoteCwd(route, '/var/log')).toBe('/Devbox > remote/var/log')
+      expect(manager.dialectFor(route.aliasPath)).toBe('bash')
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('rejects workspaces that refer to an absent server', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-remote-ssh-manager-'))
     const ctx = await createContext()
@@ -79,16 +151,17 @@ describe('RemoteSshManager', () => {
       })
       const manager = ctx.remoteSshManager
       const alias = resolve(root, 'project')
-      const next = manager.snapshot()
-      next.workspaces = []
-
-      await (manager as unknown as { publish(config: typeof next): Promise<void> }).publish(next)
+      await manager.removeWorkspace('project')
 
       expect((await stat(alias)).isDirectory()).toBe(true)
       expect(manager.snapshot().workspaces).toEqual([])
       expect(() => manager.workspace('project')).toThrow(/unknown or removed remote workspace/)
       expect(() => manager.route('README.md', alias)).toThrow(/workspace alias is no longer configured/)
       expect(() => manager.route(resolve(alias, 'README.md'))).toThrow(/workspace alias is no longer configured/)
+      expect(() => manager.routeShell('/srv/project', 'stale-session')).not.toThrow()
+
+      manager.bindSession('removed-session', {}, alias)
+      expect(() => manager.routeShell('/srv/project', 'removed-session')).toThrow(/workspace alias is no longer configured/)
     } finally {
       await ctx.fiber.dispose()
       await rm(root, { recursive: true, force: true })
@@ -130,9 +203,7 @@ describe('RemoteSshManager', () => {
       expect(b.remote).toBe(sharedRemote)
       expect(a.fs).not.toBe(b.fs)
 
-      const next = manager.snapshot()
-      next.workspaces = next.workspaces.filter(workspace => workspace.id !== 'project-a')
-      await (manager as unknown as { publish(config: typeof next): Promise<void> }).publish(next)
+      await manager.removeWorkspace('project-a')
       const stillShared = await manager.workspaceContext(manager.workspace('project-b'))
       expect(creations).toBe(1)
       expect(stillShared.remote).toBe(sharedRemote)

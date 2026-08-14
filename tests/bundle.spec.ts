@@ -48,11 +48,15 @@ describe('bundle overlay', () => {
     const shellChildren = [byId.get('remote-ssh-bash'), byId.get('remote-ssh-pwsh')]
       .flatMap(row => Array.isArray(row?.config) ? row.config as EntryOptions[] : [])
     expect(shellChildren.map(row => row.id)).toEqual([
-      'remote-ssh-bash-executor',
+      'remote-ssh-terminal-registry',
+      'remote-ssh-terminal-bash',
       'remote-ssh-bash-tool',
       'remote-ssh-pwsh-executor',
       'remote-ssh-pwsh-tool',
     ])
+    expect(shellChildren.find(row => row.id === 'remote-ssh-bash-tool')).toMatchObject({
+      name: '@deepseek-ai/dsh-tool-bash-persistent',
+    })
     expect(new Set(shellChildren.map(row => row.id)).size).toBe(shellChildren.length)
     expect(rows.some(row => String(row.name).includes('remote-tool'))).toBe(false)
   })

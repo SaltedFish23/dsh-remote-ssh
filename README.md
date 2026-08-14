@@ -17,8 +17,11 @@
 - 会话树使用 `LOCAL > ...` / `<服务器名> > ...` 标题；
 - 全局 `ctx.fs` 根据 cwd/path 透明选择本地或远端 AHP filesystem；
 - 全局 `ctx.subprocess` 根据 cwd 透明选择本地进程或 host-scoped AHP；
-- 原有 bash、pwsh、glob、grep 和后台任务直接复用透明 provider；
-- `bash` 与 `pwsh` 使用互不冲突的 Loader 条目并同时进入普通工具目录，不再由 DSH Host 所在的 Windows/Linux 平台替远端工作区裁剪工具；
+- 普通工具名直接复用透明 provider；Remote `bash` 以每 Agent 一个 AHP PTY 的形式持久化；
+- `bash` 与 `pwsh` 使用互不冲突的 Loader 条目，随后按会话工作区裁剪：POSIX/Linux Remote 只暴露 `bash`，Windows LOCAL 只暴露 `pwsh`；
+- Remote `bash` 的 cwd、`export`、激活环境、函数和 shell 后台任务跨工具调用保留；Agent 销毁、超时或 shell 退出时回收/重建 PTY；
+- bash 命令直接写入持久 AHP Terminal，不再为每次调用生成 `command-*.sh`；
+- 远端 terminal 工具卡显示 `<服务器> > <工作区>`，不再泄露内部 UUID alias；
 - 远端 AHP/SSH 隧道按 host 惰性创建；同一服务器的多个 workspace 共享一个 runtime；
 - 远端 workspace alias 是身份记录，不同步文件；
 - 删除远端映射后保留 alias、DSH Workspace 与 Session 历史（远端墓碑）。旧会话可阅读，但后续工具调用明确失败。
@@ -59,9 +62,9 @@ dsh --profile web
 - 非交互可用的系统 OpenSSH 连接；
 - POSIX shell；
 - VS Code CLI/Server 可用于 AHP filesystem（插件会尝试 `code agent host`，并兼容 VS Code Server 的 sibling `server/bin/code-server` 布局）；
-- `bash`、`base64`、`mkfifo`、`pwsh`、`rg` 等工具按实际需要安装在远端。
+- `bash`、`base64`、`mkfifo`、`rg` 等工具按实际需要安装在远端。
 
-命令解析发生在当前工作区所属主机。比如本机有 `pwsh`、Laptop 没有，Laptop 工作区中的 pwsh 调用会返回“命令不存在”，不会调用本机 pwsh；同一工作区仍可直接使用远端存在的 `bash`。
+命令解析发生在当前工作区所属主机。当前 POSIX/Linux Remote 工作区只向模型提供普通 `bash` 工具；Windows LOCAL 工作区只提供普通 `pwsh`。工具名没有 `remote_` 前缀，Host 操作系统也不会替远端错误裁剪工具。
 
 ## 实现概览
 
@@ -74,7 +77,7 @@ dsh --profile web
     └── Remote alias ─► host-scoped AHP fs/terminal/resource
 ```
 
-系统 OpenSSH 只负责 `~/.ssh/config`、SSH Agent、known_hosts、ProxyJump、AHP bootstrap 与持久 tunnel；不会为每条工具命令重新握手。远端不安装 DSH，也不上传自定义 daemon。同一 host 的文件、bash/pwsh、普通 subprocess 和交互 PTY 都复用一个 AHP 长连接。普通 subprocess 在 AHP Terminal 中启动，并把 stdout/stderr 分别写入临时 Resource 文件，经同一 WebSocket 增量采集。live stdin 通过第二条 AHP Terminal 把 Base64 分块写入远端 FIFO，EOF、取消和 FIFO 清理均属于同一进程生命周期，不再存在逐命令 SSH fallback。
+系统 OpenSSH 只负责 `~/.ssh/config`、SSH Agent、known_hosts、ProxyJump、AHP bootstrap 与持久 tunnel；不会为每条工具命令重新握手。远端不安装 DSH，也不上传自定义 daemon。同一 host 的文件、持久 Bash PTY、普通 subprocess 和交互 PTY 都复用一个 AHP 长连接。每个 Agent 的普通 `bash` 调用复用同一个 AHP Terminal；普通非 PTY subprocess 才把 stdout/stderr 分别写入临时 Resource 文件，经同一 WebSocket 增量采集。live stdin 通过第二条 AHP Terminal 把 Base64 分块写入远端 FIFO，EOF、取消和 FIFO 清理均属于同一进程生命周期，不再存在逐命令 SSH fallback。
 
 AHP host runtime 请求远端 `/` 的 Resource 能力，以匹配 DSH 权限模型：`danger-full-access` 可以访问同一主机上的其他绝对路径；`workspace-write` 的写操作仍按本次调用的 `workspaceRoot` 检查；`read-only` 拒绝写入。连接共享不等于 workspace 隔离。
 
@@ -103,12 +106,12 @@ AHP permission 不能约束任意远端 shell。bundle 使用 `danger-full-acces
 ## 当前限制
 
 - 仅支持 POSIX/Linux SSH 远端；
-- AHP filesystem、bash/pwsh、交互 PTY 以及 ignore/fixed/live-stdin 的普通 subprocess 全部按 host 复用；
+- AHP filesystem、持久 Bash PTY、交互 PTY 以及 ignore/fixed/live-stdin 的普通 subprocess 全部复用 host 连接；
 - AHP subprocess 通过轮询远端临时 stdout/stderr Resource 提供增量输出；极高吞吐、超大输出场景仍需进一步优化为 offset/range 协议；
 - 远端 PTY 可发送 Ctrl-C，但无法可靠检查或定向其他 foreground process-group signal；
 - subprocess bounded output 只保留内存尾部，尚无远端 spill file；
 - AHP Resource 读取仍是整文件返回，默认上限 64 MiB；
-- 搜索依赖远端 `rg`，pwsh 工具依赖远端 `pwsh`；缺失时诚实失败；
+- 搜索依赖远端 `rg`；缺失时诚实失败；
 - 密码和首次 host-key 提示没有 Web 交互桥，请先在终端完成确认并使用 key/agent 认证；
 - AHP 仍是 draft，VS Code 更新可能需要适配。
 

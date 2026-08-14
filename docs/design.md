@@ -2,7 +2,7 @@
 
 ## 核心不变量
 
-1. 模型面对的工具目录不因工作区变化；不存在 `remote_read`、`remote_bash` 等平行工具。
+1. 不存在 `remote_read`、`remote_bash` 等平行工具；shell 名称按工作区 OS 选择（POSIX Remote 为 `bash`，Windows LOCAL 为 `pwsh`）。
 2. 当前 workspace cwd 是执行世界的唯一主选择器。
 3. 远端错误、断线、缺少程序和删除映射都 fail closed；禁止本机 fallback。
 4. alias 是稳定身份，不是同步目录或挂载点。
@@ -20,7 +20,8 @@ ordinary tools ─ routers ─┤
 
 - `TransparentFileSystem`：用 cwd/path 匹配 alias，委托本机 fs 或该 workspace 的 AHP fs；
 - `TransparentSubprocessRuntime`：用 `spec.cwd` 选择本机 subprocess 或 host-scoped AHP subprocess；所有 stdin 模式都留在 AHP；
-- `TransparentShellExecutor`：本机调用 routed subprocess；远端 bash/pwsh 前后台任务复用 host-scoped AHP Terminal；
+- Remote `bash`：`dsh-tool-bash-persistent` → owner-scoped `ctx.terminals` → `terminal-bash` → routed `spawnTerminal()` → AHP Terminal；
+- `TransparentShellExecutor`：保留给非模型工具的 one-shot shell consumer；
 - 内置 `tool-fs-search` 保持原名并复用 routed subprocess，因此 `rg` 在当前 workspace 主机解析；
 - background handle 也由同一 subprocess 路由产生。
 
@@ -101,7 +102,9 @@ host runtime 请求 POSIX `/` Resource access，以实现 DSH 原生权限含义
 
 这使 `rg`/glob/grep、普通后台收集进程与 ignore/fixed/live stdin 调用都不再新建 SSH，同时保留 stdout/stderr 分离。argv、cwd 和环境变量使用固定 POSIX quoting；Windows 本机绝对 executable（例如某插件缓存的 `C:\...\rg.exe`）在远端只保留 basename 并去掉 `.exe`，让远端 PATH 重新解析。
 
-交互 subprocess terminal 直接使用 AHP `createTerminal`/TerminalInput/TerminalData；Ctrl-C、Ctrl-Z 可写入 PTY。AHP 不公开 foreground process group id，因此其他定向 signal 明确失败。
+Remote `bash` 为每个 live Agent 创建一个持久 AHP Terminal。命令直接通过 TerminalInput 进入该 Bash，不创建每调用一次的脚本 Resource；cwd、环境变量、函数和 shell 后台任务自然跨调用保留。Harness PTY registry 负责 owner 隔离、串行 send、bounded scrollback、超时 reset 与 Agent dispose 清理。
+
+交互 subprocess terminal 同样直接使用 AHP `createTerminal`/TerminalInput/TerminalData；Ctrl-C、Ctrl-Z 可写入 PTY。AHP 不公开 foreground process group id，因此其他定向 signal 明确失败。
 
 OpenSSH 仅用于 host runtime 的 bootstrap 与 tunnel。POSIX 本机可用短 ControlPath、`ControlMaster=auto` 与 `ControlPersist=60` 合并启动阶段的 SSH 会话；Windows 自带 OpenSSH 和 Git OpenSSH 在实测中会 reset multiplex session，因此 Windows 禁用 ControlMaster。两种平台进入 AHP ready 状态后，普通 fs、shell、搜索、subprocess 和 PTY 都走 host 长连接，不存在逐命令握手。
 
