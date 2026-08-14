@@ -14,7 +14,7 @@ Choose `LOCAL > project` and ordinary file, search, shell, and background-task t
 - labels workspaces and terminal calls as `LOCAL > ...` or `<Server> > ...`;
 - routes filesystem access, search, subprocesses, background jobs, and terminals by the active workspace;
 - exposes `bash` for POSIX remote workspaces and `pwsh` for local Windows workspaces;
-- keeps one persistent remote Bash PTY per live agent, preserving cwd, environment variables, functions, and background shell state;
+- reuses one persistent SSH/AHP host connection while each Bash call opens its own terminal channel, like a new VS Code terminal tab;
 - shares one host-scoped SSH/AHP connection across workspaces on the same server;
 - preserves readable Workspace and Session history after a remote mapping is removed, while rejecting new tool calls from the old session.
 

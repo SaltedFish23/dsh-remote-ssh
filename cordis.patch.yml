@@ -66,24 +66,23 @@
         dialect: !!js >-
           process.platform === 'win32' ? 'pwsh' : 'bash'
 
-    # Remote Bash is a persistent, Agent-owned PTY. The existing Harness
-    # terminal stack consumes routed subprocess.spawnTerminal(), which becomes
-    # an AHP createTerminal call for a Remote workspace and a local PTY for a
-    # local POSIX workspace. No per-command remote script is materialized.
+    # Official Bash keeps its complete contract. Every call opens an AHP
+    # terminal channel on the host's pooled SSH/AHP connection; it does not
+    # perform another SSH handshake.
     - id: remote-ssh-bash
       name: cordis:group
       group: true
+      isolate:
+        shell: true
       config:
-        - id: remote-ssh-terminal-registry
-          name: '@deepseek-ai/dsh-terminal'
-        - id: remote-ssh-terminal-bash
-          name: '@deepseek-ai/dsh-terminal-bash'
-          inject: [terminals, sandboxPolicy, subprocess]
+        - id: remote-ssh-bash-shell
+          name: dsh-remote-ssh/shell-transparent
+          inject: [subprocess, remoteSshManager]
           config:
-            shellPath: bash
+            dialect: bash
         - id: remote-ssh-bash-tool
-          name: '@deepseek-ai/dsh-tool-bash-persistent'
-          inject: [tools, terminals]
+          name: '@deepseek-ai/dsh-tool-bash'
+          inject: [tools, shell, systemPrompt, shellEnv]
 
     - id: remote-ssh-pwsh
       name: cordis:group
@@ -101,10 +100,10 @@
           inject: [tools, shell, systemPrompt, shellEnv]
 
     # Shell names remain ordinary, but each Agent sees only the dialect of its
-    # workspace OS. Remote Bash state is scoped to that exact live Agent.
+    # workspace OS. The host connection is shared; command channels are isolated.
     - id: remote-ssh-agent-policy
       name: dsh-remote-ssh/agent-policy
-      inject: [remoteSshManager, tools]
+      inject: [remoteSshManager, systemPrompt, tools]
 
 # Replace only capability providers; callers and visible tool names do not
 # change. A remote search therefore reuses tool-fs-search through the routed

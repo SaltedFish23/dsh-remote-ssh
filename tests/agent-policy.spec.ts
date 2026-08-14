@@ -1,11 +1,9 @@
-import {
-  assertSupportedJsonSchema,
-  defineTool,
-  type JsonSchemaNode,
-  type ToolCallView,
-} from '@deepseek-ai/dsh-tools'
+import { Context } from '@deepseek-ai/cordis'
+import { createScope, scopeOf } from '@deepseek-ai/dsh-scope'
+import SystemPrompt, { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
+import { defineTool, type ToolCallView } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it } from 'vitest'
-import { bashShellPresentation, presentRemoteShellCall } from '../src/agent-policy.ts'
+import { installRemoteWorkspacePrompt, presentRemoteShellCall, remoteShellPresentation } from '../src/agent-policy.ts'
 import type { RemoteWorkspaceRoute } from '../src/manager.ts'
 
 const route = {
@@ -15,42 +13,69 @@ const route = {
 } as RemoteWorkspaceRoute
 
 describe('remote shell presentation', () => {
-  it('restores the standard Bash description without replacing persistent execution', () => {
-    const execute = async () => 'ok'
+  it('publishes only the remote cwd to the scoped System Prompt', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt, { persona: 'Your working directory is {{cwd}}.' })
+    ctx.systemPrompt.variable('cwd', () => String.raw`C:\host-only\workspace-alias`)
+    let remoteScope!: ReturnType<typeof createScope>
+    await ctx.plugin(Object.assign((inner: Context) => {
+      remoteScope = createScope(inner, { name: 'remote-agent' })
+    }, { inject: ['systemPrompt'] }))
+
+    installRemoteWorkspacePrompt(remoteScope.ctx, route)
+    const key = scopeOf(remoteScope.ctx)
+    if (key === undefined) throw new Error('test scope has no scope key')
+    const prompt = renderPrompt(await ctx.systemPrompt.assemble({ scope: key }))
+
+    expect(prompt).toContain('Your working directory is /srv/project.')
+    expect(prompt).toContain('This session runs in a Remote SSH workspace.')
+    expect(prompt).not.toContain('host-only')
+    expect(prompt).not.toContain('workspace-alias')
+    await remoteScope.dispose()
+    await ctx.fiber.dispose()
+  })
+
+  it('keeps the official Bash contract and changes only its displayed cwd', () => {
     const base = defineTool({
       name: 'bash',
-      description: 'Run Bash in a persistent PTY.',
+      description: 'Official Bash contract.',
       parameters: {
         command: { type: 'string', required: true },
+        description: { type: 'string', required: true },
+        timeoutMs: { type: 'number' },
+        workdir: { type: 'string' },
+        run_in_background: { type: 'boolean' },
       },
-      output: {
-        schema: { type: 'string' },
-        render: () => [],
-      },
-      execute,
-      presentCall: (args): ToolCallView => ({
+      output: { schema: { type: 'string' }, render: () => [] },
+      execute: async () => 'ok',
+      presentCall: args => ({
         card: 'terminal',
         title: args.command,
+        description: args.description,
+        ...args.workdir === undefined ? {} : { cwd: args.workdir },
       }),
+      presentResult: () => ({ card: 'terminal', output: 'ok', exitCode: 0 }),
     })
+    const manager = {
+      displayRemoteCwd: (_route: RemoteWorkspaceRoute, workdir?: string) => workdir ?? '/srv/project',
+    }
+    const wrapped = remoteShellPresentation(base, manager as never, route)
 
-    const baseExecute = base.execute
-    const presented = bashShellPresentation(base)
-
-    expect(presented.execute).toBe(baseExecute)
-    expect(presented.parameters.description).toBeUndefined()
-    expect(presented.parameters.properties).toMatchObject({
-      description: { type: 'string' },
-    })
-    expect(presented.parameters.required).toEqual(['command', 'description'])
-    expect(() => assertSupportedJsonSchema(presented.parameters as JsonSchemaNode)).not.toThrow()
-    expect(presented.presentCall?.({
-      command: 'pwd && rg --version',
-      description: 'Check current directory and rg availability',
+    expect(wrapped.parameters).toBe(base.parameters)
+    expect(wrapped.execute).toBe(base.execute)
+    expect(wrapped.output).toBe(base.output)
+    expect(wrapped.presentResult).toBe(base.presentResult)
+    expect(wrapped.presentCall?.({
+      command: 'pnpm audit',
+      description: 'Audit package dependencies for vulnerabilities',
+      timeoutMs: 30_000,
+      workdir: '/srv/project/app',
+      run_in_background: false,
     })).toEqual({
       card: 'terminal',
-      title: 'pwd && rg --version',
-      description: 'Check current directory and rg availability',
+      title: 'pnpm audit',
+      description: 'Audit package dependencies for vulnerabilities',
+      cwd: '/srv/project/app',
     })
   })
 
