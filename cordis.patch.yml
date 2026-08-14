@@ -1,0 +1,144 @@
+# Transparent local/Remote SSH execution. The model-facing tool catalog stays
+# ordinary: fs, bash, pwsh, glob, grep, and jobs select an execution world from
+# the workspace cwd instead of exposing remote_* alternatives.
+
+- insert:
+    # Bare package row makes the dsh.client manifest discoverable. Its node
+    # half is intentionally empty; provider rows below stay independently HMR-able.
+    - id: remote-ssh-client-host
+      name: dsh-remote-ssh
+
+    # Preserve the shipped local providers in a private realm. The bridge
+    # publishes them under non-conflicting names consumed by the root routers.
+    - id: remote-ssh-local-world
+      name: cordis:group
+      group: true
+      isolate:
+        fs: true
+        subprocess: true
+      config:
+        - id: local-subprocess
+          name: '@deepseek-ai/dsh-subprocess-local'
+        - id: local-fs
+          name: '@deepseek-ai/dsh-fs-sandbox'
+        - id: bridge
+          name: dsh-remote-ssh/local-bridge
+          inject: [fs, subprocess]
+
+    - id: remote-ssh-manager
+      name: dsh-remote-ssh/manager
+      inject: [settings]
+      config:
+        aliasRoot: !!js process.env.DSH_REMOTE_SSH_ALIAS_ROOT ?? dshHomePath('remote-ssh/workspaces')
+        servers: !!js >-
+          process.env.DSH_REMOTE_SSH_TARGET
+            ? [{ id: 'default', label: process.env.DSH_REMOTE_SSH_LABEL ?? process.env.DSH_REMOTE_SSH_TARGET, sshTarget: process.env.DSH_REMOTE_SSH_TARGET, remoteCodeCommand: process.env.DSH_REMOTE_SSH_CODE ?? 'code' }]
+            : []
+        workspaces: !!js >-
+          process.env.DSH_REMOTE_SSH_TARGET && process.env.DSH_REMOTE_SSH_WORKSPACE
+            ? [{ id: 'default', serverId: 'default', remotePath: process.env.DSH_REMOTE_SSH_WORKSPACE, ...(process.env.DSH_REMOTE_SSH_LOCAL_WORKSPACE ? { aliasPath: process.env.DSH_REMOTE_SSH_LOCAL_WORKSPACE } : {}) }]
+            : []
+
+    - id: remote-ssh-web
+      name: dsh-remote-ssh/web
+      inject: [remoteSshManager, webServer]
+
+    # Both LOCAL and Remote use this plugin's in-app browser. The Host browse
+    # backend supplies local listings; Remote listings come from SSH/AHP.
+    - id: remote-ssh-directory-browser
+      name: '@deepseek-ai/dsh-host-directory-picker-browse'
+
+    - id: remote-ssh-fs-router
+      name: dsh-remote-ssh/router-fs
+      inject: [localFs, remoteSshManager]
+
+    - id: remote-ssh-subprocess-router
+      name: dsh-remote-ssh/router-subprocess
+      inject: [localSubprocess, remoteSshManager]
+
+    # Preserve the process-host dialect for non-tool shell consumers (hooks,
+    # permission capability inspection). Visible bash/pwsh tools below each
+    # bind their own explicit dialect while sharing the same cwd router.
+    - id: remote-ssh-shell-default
+      name: dsh-remote-ssh/shell-transparent
+      inject: [subprocess, remoteSshManager]
+      config:
+        dialect: !!js >-
+          process.platform === 'win32' ? 'pwsh' : 'bash'
+
+    # Each dialect receives a private `shell` realm while both contribute their
+    # existing ordinary tool names to the global tool catalog.
+    - id: remote-ssh-bash
+      name: cordis:group
+      group: true
+      isolate:
+        shell: true
+      config:
+        - id: remote-ssh-bash-executor
+          name: dsh-remote-ssh/shell-transparent
+          inject: [subprocess, remoteSshManager]
+          config:
+            dialect: bash
+        - id: remote-ssh-bash-tool
+          name: '@deepseek-ai/dsh-tool-bash'
+          inject: [tools, shell, systemPrompt, shellEnv]
+
+    - id: remote-ssh-pwsh
+      name: cordis:group
+      group: true
+      isolate:
+        shell: true
+      config:
+        - id: remote-ssh-pwsh-executor
+          name: dsh-remote-ssh/shell-transparent
+          inject: [subprocess, remoteSshManager]
+          config:
+            dialect: pwsh
+        - id: remote-ssh-pwsh-tool
+          name: '@deepseek-ai/dsh-tool-pwsh'
+          inject: [tools, shell, systemPrompt, shellEnv]
+
+    # Shell names remain ordinary, but each Agent sees only the dialect of its
+    # workspace OS. This also binds explicit workdir calls to the Agent's host.
+    - id: remote-ssh-agent-policy
+      name: dsh-remote-ssh/agent-policy
+      inject: [remoteSshManager, tools]
+
+# Replace only capability providers; callers and visible tool names do not
+# change. A remote search therefore reuses tool-fs-search through the routed
+# subprocess service and resolves `rg` inside the remote execution world.
+- id: subprocess
+  disabled: true
+
+- id: fs-sandbox
+  disabled: true
+
+- id: bash-sandbox
+  disabled: true
+
+- id: pwsh-sandbox
+  disabled: true
+
+- id: tool-bash
+  disabled: true
+
+- id: tool-pwsh
+  disabled: true
+
+- id: tool-fs-search
+  disabled: false
+
+- id: directory-picker
+  disabled: true
+
+# Local and remote arbitrary processes cannot share one kernel confinement
+# mechanism. Refuse restrictive shell calls in the executor and make the SSH
+# account/container the remote security boundary.
+- id: sandbox-policy
+  config:
+    mode: danger-full-access
+    workspaceRoot: !!js process.cwd()
+
+- id: approval
+  config:
+    policy: never

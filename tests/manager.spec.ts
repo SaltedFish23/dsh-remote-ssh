@@ -1,0 +1,194 @@
+import { mkdtemp, rm, stat } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
+import { SettingsProvider } from '@deepseek-ai/dsh-settings'
+import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
+import RemoteSshManager from '../src/manager.ts'
+import { describe, expect, it } from 'vitest'
+
+class MemorySettings extends SettingsProvider {
+  private storedDocument: Record<string, unknown> = {}
+
+  get writable(): boolean { return true }
+
+  protected load(): Promise<Record<string, unknown>> {
+    return Promise.resolve(structuredClone(this.storedDocument))
+  }
+
+  protected persist(namespace: SettingsNamespace, section: Record<string, unknown>): Promise<void> {
+    this.storedDocument = { ...this.storedDocument, [namespace]: structuredClone(section) }
+    return Promise.resolve()
+  }
+}
+
+async function createContext(): Promise<Context> {
+  const ctx = new Context()
+  await ctx.plugin(MemorySettings).await()
+  return ctx
+}
+
+describe('RemoteSshManager', () => {
+  it('selects a remote execution world from the workspace alias', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-remote-ssh-manager-'))
+    const ctx = await createContext()
+    try {
+      await ctx.plugin(RemoteSshManager, {
+        aliasRoot: root,
+        servers: [{ id: 'devbox', label: 'Devbox', sshTarget: 'test-devbox' }],
+        workspaces: [{ id: 'project', serverId: 'devbox', remotePath: '/srv/project' }],
+      })
+      const alias = resolve(root, 'project')
+      const route = ctx.remoteSshManager.route('src/index.ts', alias)
+      expect(route).toMatchObject({
+        kind: 'remote',
+        aliasPath: alias,
+        server: { id: 'devbox', label: 'Devbox' },
+        workspace: { id: 'project', remotePath: '/srv/project' },
+      })
+      expect(ctx.remoteSshManager.route(resolve(root, '..', 'local'), resolve(root, '..', 'local'))).toEqual({ kind: 'local' })
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects workspaces that refer to an absent server', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-remote-ssh-manager-'))
+    const ctx = await createContext()
+    try {
+      await expect(ctx.plugin(RemoteSshManager, {
+        aliasRoot: root,
+        servers: [],
+        workspaces: [{ id: 'project', serverId: 'missing', remotePath: '/srv/project' }],
+      })).rejects.toThrow(/unknown server 'missing'/)
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('tombstones removed aliases so stale sessions stay readable but cannot execute locally', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-remote-ssh-manager-'))
+    const ctx = await createContext()
+    try {
+      await ctx.plugin(RemoteSshManager, {
+        aliasRoot: root,
+        servers: [{ id: 'devbox', label: 'Devbox', sshTarget: 'test-devbox' }],
+        workspaces: [{ id: 'project', serverId: 'devbox', remotePath: '/srv/project' }],
+      })
+      const manager = ctx.remoteSshManager
+      const alias = resolve(root, 'project')
+      const next = manager.snapshot()
+      next.workspaces = []
+
+      await (manager as unknown as { publish(config: typeof next): Promise<void> }).publish(next)
+
+      expect((await stat(alias)).isDirectory()).toBe(true)
+      expect(manager.snapshot().workspaces).toEqual([])
+      expect(() => manager.workspace('project')).toThrow(/unknown or removed remote workspace/)
+      expect(() => manager.route('README.md', alias)).toThrow(/workspace alias is no longer configured/)
+      expect(() => manager.route(resolve(alias, 'README.md'))).toThrow(/workspace alias is no longer configured/)
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('shares one host runtime across multiple workspaces on the same server', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-remote-ssh-manager-'))
+    const ctx = await createContext()
+    try {
+      await ctx.plugin(RemoteSshManager, {
+        aliasRoot: root,
+        servers: [{ id: 'devbox', label: 'Devbox', sshTarget: 'test-devbox' }],
+        workspaces: [
+          { id: 'project-a', serverId: 'devbox', remotePath: '/srv/project-a' },
+          { id: 'project-b', serverId: 'devbox', remotePath: '/srv/project-b' },
+        ],
+      })
+      const manager = ctx.remoteSshManager
+      const hostCtx = new Context()
+      const sharedRemote = { marker: 'shared-host-runtime' }
+      let creations = 0
+      ;(manager as unknown as { createHostContext(server: unknown): Promise<unknown> }).createHostContext = async () => {
+        creations += 1
+        return {
+          ctx: hostCtx,
+          remote: sharedRemote,
+          key: JSON.stringify(['test-devbox', [], 'code', null]),
+          server: { id: 'devbox', label: 'Devbox', sshTarget: 'test-devbox' },
+          transport: { executable: 'ssh', args: [], multiplexed: false },
+        }
+      }
+
+      const a = await manager.workspaceContext(manager.workspace('project-a'))
+      const b = await manager.workspaceContext(manager.workspace('project-b'))
+
+      expect(creations).toBe(1)
+      expect(a.remote).toBe(sharedRemote)
+      expect(b.remote).toBe(sharedRemote)
+      expect(a.fs).not.toBe(b.fs)
+
+      const next = manager.snapshot()
+      next.workspaces = next.workspaces.filter(workspace => workspace.id !== 'project-a')
+      await (manager as unknown as { publish(config: typeof next): Promise<void> }).publish(next)
+      const stillShared = await manager.workspaceContext(manager.workspace('project-b'))
+      expect(creations).toBe(1)
+      expect(stillShared.remote).toBe(sharedRemote)
+      expect(() => manager.route(undefined, resolve(root, 'project-a'))).toThrow(/no longer configured/)
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('lists only remote directories from the shared AHP host connection', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-remote-ssh-manager-'))
+    const ctx = await createContext()
+    try {
+      await ctx.plugin(RemoteSshManager, {
+        aliasRoot: root,
+        servers: [{ id: 'devbox', label: 'Devbox', sshTarget: 'test-devbox' }],
+        workspaces: [],
+      })
+      const manager = ctx.remoteSshManager
+      const hostCtx = new Context()
+      const requestedUris: string[] = []
+      const remote = {
+        getConnection: async () => ({
+          defaultDirectory: 'file:///home/tester',
+          client: {
+            resourceList: async ({ uri }: { uri: string }) => {
+              requestedUris.push(uri)
+              return { entries: [{ name: 'projects', type: 'directory' }, { name: 'notes.txt', type: 'file' }, { name: 'archive', type: 'directory' }] }
+            },
+          },
+        }),
+      }
+      ;(manager as unknown as { createHostContext(server: unknown): Promise<unknown> }).createHostContext = async server => ({
+        ctx: hostCtx,
+        remote,
+        key: JSON.stringify(['test-devbox', [], 'code', null]),
+        server,
+        transport: { executable: 'ssh', args: [], multiplexed: false },
+      })
+
+      const server = manager.snapshot().servers[0]!
+      await expect(manager.listRemoteDirectory(server)).resolves.toEqual({
+        path: '/home/tester',
+        home: '/home/tester',
+        parent: '/home',
+        entries: [
+          { name: 'archive', path: '/home/tester/archive' },
+          { name: 'projects', path: '/home/tester/projects' },
+        ],
+      })
+      expect(requestedUris).toEqual(['file:///home/tester'])
+      await expect(manager.listRemoteDirectory(server, 'relative/path')).rejects.toThrow(/absolute POSIX path/)
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
