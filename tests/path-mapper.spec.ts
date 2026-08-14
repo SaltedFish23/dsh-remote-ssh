@@ -18,7 +18,6 @@ describe('WorkspacePathMapper', () => {
     expect(mapper.toRemotePath(resolve(local, 'src', 'main.ts'))).toBe('/srv/project/src/main.ts')
     expect(mapper.toRemotePath('src\\main.ts', local)).toBe('/srv/project/src/main.ts')
     expect(mapper.toRemotePath('/var/log')).toBe('/var/log')
-    expect(mapper.toDisplayPath('/srv/project/src/main.ts')).toBe(resolve(local, 'src', 'main.ts'))
     if (process.platform === 'win32') {
       expect(() => mapper.toRemotePath(resolve(local, '..', 'outside.txt'))).toThrow(/outside/)
     }

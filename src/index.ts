@@ -126,14 +126,6 @@ export class WorkspacePathMapper {
     return posix.resolve(base, input.replaceAll('\\', '/'))
   }
 
-  toDisplayPath(remotePath: string): string {
-    const normalized = posix.normalize(remotePath)
-    const rel = posix.relative(this.remoteWorkspace, normalized)
-    if (rel === '' || (rel !== '..' && !rel.startsWith('../') && !posix.isAbsolute(rel))) {
-      return resolve(this.localWorkspace, ...rel.split('/').filter(Boolean))
-    }
-    return normalized
-  }
 }
 
 declare module '@deepseek-ai/cordis' {

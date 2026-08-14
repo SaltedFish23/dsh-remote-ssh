@@ -14,6 +14,8 @@ import type {
 } from '@deepseek-ai/dsh-fs'
 import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
 import type { RemoteSshManager, RemoteWorkspaceRoute } from './manager.ts'
+import { binaryWriter } from './binary-fs.ts'
+import type { FsBytesWriteOutcome } from './binary-fs.ts'
 
 interface RemoteTargetEnvelope {
   workspaceId: string
@@ -112,6 +114,17 @@ export class TransparentFileSystem extends FileSystem {
   ): Promise<FsWriteOutcome> {
     const backend = await this.backend(target)
     return backend.fs.writeText(backend.target, content, expected, signal, sandboxPolicy)
+  }
+
+  async writeBytes(
+    target: FsTarget,
+    content: Uint8Array,
+    expected?: FsWriteIntent,
+    signal?: AbortSignal,
+    sandboxPolicy?: SandboxExecutionPolicy,
+  ): Promise<FsBytesWriteOutcome> {
+    const backend = await this.backend(target)
+    return binaryWriter(backend.fs).writeBytes(backend.target, content, expected, signal, sandboxPolicy)
   }
 
   override async editText(

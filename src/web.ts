@@ -3,7 +3,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import type { RemoteSshManager, RemoteSshServer } from './manager.ts'
+import type { RemoteOpenFileMode, RemoteSshManager, RemoteSshServer } from './manager.ts'
+import { openRemoteFile } from './open-file.ts'
 import { appendSshHost, defaultSshConfigFiles, discoverSshConfigHosts } from './ssh-config.ts'
 
 export const REMOTE_SSH_STATE_PATH = '/plugins/dsh-remote-ssh/state'
@@ -16,6 +17,7 @@ export const REMOTE_SSH_PROBE_PATH = '/plugins/dsh-remote-ssh/probe'
 export const REMOTE_SSH_CONFIG_HOST_PATH = '/plugins/dsh-remote-ssh/ssh-config/host'
 export const REMOTE_SSH_SETTINGS_PATH = '/plugins/dsh-remote-ssh/settings'
 export const REMOTE_SSH_DIRECTORY_PATH = '/plugins/dsh-remote-ssh/directory'
+export const REMOTE_SSH_OPEN_FILE_PATH = '/plugins/dsh-remote-ssh/open-file'
 
 export const name = 'dsh-remote-ssh-web'
 export const inject = ['remoteSshManager', 'webServer']
@@ -28,10 +30,20 @@ export function apply(ctx: Context): void {
     }),
     route(ctx, REMOTE_SSH_SETTINGS_PATH, 'POST', async (req, res) => {
       const body = await readJson(req)
-      const value = body.sshConfigFile
-      if (value !== undefined && typeof value !== 'string') throw new Error('sshConfigFile must be a string')
-      await ctx.remoteSshManager.setSshConfigFile(value as string | undefined)
-      json(res, 200, { sshConfigFile: ctx.remoteSshManager.snapshot().sshConfigFile })
+      const sshConfigFile = optionalString(body, 'sshConfigFile')
+      const openFileEditorPath = optionalString(body, 'openFileEditorPath')
+      const openFileMode = body.openFileMode === undefined ? undefined : parseOpenFileMode(body.openFileMode)
+      await ctx.remoteSshManager.updateUserPreferences({
+        ...(sshConfigFile === undefined ? {} : { sshConfigFile }),
+        ...(openFileMode === undefined ? {} : { openFileMode }),
+        ...(openFileEditorPath === undefined ? {} : { openFileEditorPath }),
+      })
+      const snapshot = ctx.remoteSshManager.snapshot()
+      json(res, 200, {
+        sshConfigFile: snapshot.sshConfigFile,
+        openFileMode: snapshot.openFileMode,
+        openFileEditorPath: snapshot.openFileEditorPath,
+      })
     }),
     route(ctx, REMOTE_SSH_DIRECTORY_PATH, 'POST', async (req, res) => {
       const body = await readJson(req)
@@ -39,6 +51,14 @@ export function apply(ctx: Context): void {
       const path = body.path
       if (path !== undefined && typeof path !== 'string') throw new Error('path must be a string')
       json(res, 200, await ctx.remoteSshManager.listRemoteDirectory(server, path as string | undefined))
+    }),
+    route(ctx, REMOTE_SSH_OPEN_FILE_PATH, 'POST', async (req, res) => {
+      const body = await readJson(req)
+      json(res, 200, await openRemoteFile(
+        ctx.remoteSshManager,
+        requiredString(body, 'workspaceId'),
+        requiredString(body, 'path'),
+      ))
     }),
     route(ctx, REMOTE_SSH_WORKSPACE_PATH, 'POST', async (req, res) => {
       const body = await readJson(req)
@@ -106,6 +126,8 @@ async function catalogState(manager: RemoteSshManager) {
     loadedConfigFiles: discovery.files,
     configErrors: discovery.errors,
     customConfigFile: snapshot.sshConfigFile,
+    openFileMode: snapshot.openFileMode,
+    openFileEditorPath: snapshot.openFileEditorPath,
   }
 }
 
@@ -163,6 +185,19 @@ function requiredString(body: Record<string, unknown>, key: string): string {
   const value = body[key]
   if (typeof value !== 'string' || value.trim().length === 0) throw new Error(`${key} must be a non-empty string`)
   return value
+}
+
+function optionalString(body: Record<string, unknown>, key: string): string | undefined {
+  const value = body[key]
+  if (value === undefined) return undefined
+  if (typeof value !== 'string') throw new Error(`${key} must be a string`)
+  return value
+}
+
+function parseOpenFileMode(value: unknown): RemoteOpenFileMode {
+  if (value === 'auto' || value === 'vscode' || value === 'cursor' || value === 'windsurf'
+    || value === 'vscodium' || value === 'custom' || value === 'download') return value
+  throw new Error('openFileMode is invalid')
 }
 
 function trustedRequest(req: IncomingMessage): boolean {

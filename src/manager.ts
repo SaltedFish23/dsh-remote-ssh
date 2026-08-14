@@ -15,7 +15,6 @@ import z from '@deepseek-ai/schemastery'
 import RemoteSshFileSystem from './fs.ts'
 import RemoteSshRuntime, { fileUriFromPosixPath, posixPathFromFileUri, WorkspacePathMapper } from './index.ts'
 import RemoteSshShellExecutor from './shell.ts'
-import { defaultSshConfigFiles } from './ssh-config.ts'
 
 /** One SSH destination visible in Settings and workspace selection. */
 export interface RemoteSshServer {
@@ -35,6 +34,9 @@ export interface RemoteSshWorkspace {
   aliasPath?: string
 }
 
+/** Host-side policy for file links produced inside a remote Session. */
+export type RemoteOpenFileMode = 'auto' | 'vscode' | 'cursor' | 'windsurf' | 'vscodium' | 'custom' | 'download'
+
 /** Multi-host transparent routing configuration. */
 export interface Config {
   aliasRoot?: string
@@ -42,6 +44,12 @@ export interface Config {
   sshConfigFile?: string
   servers?: RemoteSshServer[]
   workspaces?: RemoteSshWorkspace[]
+  /** Prefer a VS Code-compatible Remote SSH editor; download is the fallback. */
+  openFileMode?: RemoteOpenFileMode
+  /** Absolute executable path used when openFileMode is custom. */
+  openFileEditorPath?: string
+  /** Maximum size of one downloaded fallback snapshot. */
+  openFileDownloadMaxBytes?: number
   startupTimeoutMs?: number
   requestTimeoutMs?: number
 }
@@ -51,6 +59,9 @@ interface ResolvedConfig {
   sshConfigFile?: string
   servers: RemoteSshServer[]
   workspaces: RemoteSshWorkspace[]
+  openFileMode: RemoteOpenFileMode
+  openFileEditorPath?: string
+  openFileDownloadMaxBytes: number
   startupTimeoutMs: number
   requestTimeoutMs: number
 }
@@ -142,11 +153,12 @@ export class RemoteSshManager extends Service {
 
   static Config: z<Config> = z.object({
     aliasRoot: z.string().default(resolve(process.env.DSH_HOME ?? resolve(process.env.USERPROFILE ?? '.', '.dsh'), 'remote-ssh', 'workspaces')),
-    sshConfigFile: z.string()
-      .description('自定义 SSH 配置文件')
-      .comment(`绝对文件路径。留空时读取：${defaultSshConfigFiles().join('；')}`),
+    sshConfigFile: z.string(),
     servers: z.array(serverSchema).default([]),
     workspaces: z.array(workspaceSchema).default([]),
+    openFileMode: z.union(['auto', 'vscode', 'cursor', 'windsurf', 'vscodium', 'custom', 'download'] as const).default('auto'),
+    openFileEditorPath: z.string(),
+    openFileDownloadMaxBytes: z.number().default(64 * 1024 * 1024),
     startupTimeoutMs: z.number().default(600_000),
     requestTimeoutMs: z.number().default(30_000),
   })
@@ -223,9 +235,36 @@ export class RemoteSshManager extends Service {
 
   /** Select one custom OpenSSH config, or restore the platform defaults. */
   async setSshConfigFile(path?: string): Promise<void> {
+    await this.updateUserPreferences({ sshConfigFile: path ?? '' })
+  }
+
+  /** Update the native remote editor preference and its download fallback limit. */
+  async setOpenFileSettings(input: {
+    mode: RemoteOpenFileMode
+    editorPath?: string
+  }): Promise<void> {
+    await this.updateUserPreferences({
+      openFileMode: input.mode,
+      openFileEditorPath: input.editorPath ?? '',
+    })
+  }
+
+  /** Atomically update user-facing plugin preferences. Empty paths clear overrides. */
+  async updateUserPreferences(input: {
+    sshConfigFile?: string
+    openFileMode?: RemoteOpenFileMode
+    openFileEditorPath?: string
+  }): Promise<void> {
     const next = this.snapshot()
-    if (path === undefined || path.trim() === '') delete next.sshConfigFile
-    else next.sshConfigFile = path.trim()
+    if (input.sshConfigFile !== undefined) {
+      if (input.sshConfigFile.trim() === '') delete next.sshConfigFile
+      else next.sshConfigFile = input.sshConfigFile.trim()
+    }
+    if (input.openFileMode !== undefined) next.openFileMode = input.openFileMode
+    if (input.openFileEditorPath !== undefined) {
+      if (input.openFileEditorPath.trim() === '') delete next.openFileEditorPath
+      else next.openFileEditorPath = input.openFileEditorPath.trim()
+    }
     this.validate(next)
     await this.replaceSettings(next)
   }
@@ -633,6 +672,9 @@ export class RemoteSshManager extends Service {
   private validate(config: ResolvedConfig): void {
     if (!isAbsolute(config.aliasRoot)) throw new Error('dsh-remote-ssh: aliasRoot must be an absolute local path')
     if (config.sshConfigFile !== undefined && !isAbsolute(config.sshConfigFile)) throw new Error('dsh-remote-ssh: sshConfigFile must be an absolute path')
+    if (config.openFileEditorPath !== undefined && !isAbsolute(config.openFileEditorPath)) throw new Error('dsh-remote-ssh: openFileEditorPath must be an absolute path')
+    if (config.openFileMode === 'custom' && config.openFileEditorPath === undefined) throw new Error('dsh-remote-ssh: custom openFileMode requires openFileEditorPath')
+    if (!Number.isSafeInteger(config.openFileDownloadMaxBytes) || config.openFileDownloadMaxBytes <= 0) throw new Error('dsh-remote-ssh: openFileDownloadMaxBytes must be a positive integer')
     if (!Number.isSafeInteger(config.startupTimeoutMs) || config.startupTimeoutMs <= 0) throw new Error('dsh-remote-ssh: startupTimeoutMs must be a positive integer')
     if (!Number.isSafeInteger(config.requestTimeoutMs) || config.requestTimeoutMs <= 0) throw new Error('dsh-remote-ssh: requestTimeoutMs must be a positive integer')
     const serverIds = new Set<string>()

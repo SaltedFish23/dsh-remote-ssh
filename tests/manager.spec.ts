@@ -29,6 +29,36 @@ async function createContext(): Promise<Context> {
 }
 
 describe('RemoteSshManager', () => {
+  it('persists remote open preferences atomically with safe defaults', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-remote-ssh-manager-'))
+    const ctx = await createContext()
+    try {
+      await ctx.plugin(RemoteSshManager, { aliasRoot: root })
+      const manager = ctx.remoteSshManager
+      expect(manager.snapshot()).toMatchObject({
+        openFileMode: 'auto',
+        openFileDownloadMaxBytes: 64 * 1024 * 1024,
+      })
+
+      const editor = resolve(root, 'Editor.exe')
+      await manager.updateUserPreferences({
+        sshConfigFile: resolve(root, 'ssh-config'),
+        openFileMode: 'custom',
+        openFileEditorPath: editor,
+      })
+      expect(manager.snapshot()).toMatchObject({
+        sshConfigFile: resolve(root, 'ssh-config'),
+        openFileMode: 'custom',
+        openFileEditorPath: editor,
+      })
+      await manager.updateUserPreferences({ openFileMode: 'download', openFileEditorPath: '' })
+      expect(manager.snapshot().openFileEditorPath).toBeUndefined()
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('selects a remote execution world from the workspace alias', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-remote-ssh-manager-'))
     const ctx = await createContext()

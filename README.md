@@ -13,8 +13,10 @@ Choose `LOCAL > project` and ordinary file, search, shell, and background-task t
 - provides the same editable directory browser for local and remote folders;
 - labels workspaces and terminal calls as `LOCAL > ...` or `<Server> > ...`;
 - routes filesystem access, search, subprocesses, background jobs, and terminals by the active workspace;
+- exposes binary workspace writes for artifact plugins such as `dsh-codex` image generation; raw bytes are base64-encoded only inside AHP `resourceWrite` transport;
 - keeps remote search results in POSIX path space and stores oversized tool results in a private runtime directory on the corresponding SSH host for follow-up `read`/`grep` access;
 - exposes `bash` for POSIX remote workspaces and `pwsh` for local Windows workspaces;
+- opens remote file links in an installed VS Code-compatible editor through its Remote SSH extension, with a local downloaded snapshot as fallback;
 - reuses one persistent SSH/AHP host connection while each Bash call opens its own terminal channel, like a new VS Code terminal tab;
 - shares one host-scoped SSH/AHP connection across workspaces on the same server;
 - preserves readable Workspace and Session history after a remote mapping is removed, while rejecting new tool calls from the old session.
@@ -50,6 +52,8 @@ Codex, Claude Code, and other automation agents should follow [INSTALL.md](INSTA
 
 To use a non-default SSH configuration, set its absolute path under **Settings → Plugins → Remote SSH → Custom SSH config file**.
 
+Remote file links use the first supported VS Code-compatible editor by default. Choose a specific editor or the download-only fallback under **Settings → Plugins → Remote SSH → Open remote files with**.
+
 The remote host needs:
 
 - a POSIX shell and non-interactive OpenSSH access;
@@ -62,6 +66,8 @@ The plugin checks `code` on PATH, its private `~/.dsh-remote-ssh/cli/bin/code` l
 ## How workspaces behave
 
 The active workspace is the execution boundary. A remote session resolves absolute paths, executables, shell state, and search tools on its SSH host—even when a local file or executable has the same name.
+
+Remote filesystem results expose POSIX paths only. The local Workspace identity directory is never presented to the model or emitted by cooperating plugins as a file path.
 
 When a tool result exceeds the inline budget, a remote session writes the complete result through AHP into that SSH host's private runtime directory and returns a remote POSIX locator. The local spill backend is used only for local sessions; an unknown or stale session never falls back to host storage. Stock `glob`/`grep` results are also normalized back into remote POSIX path space, preventing a Windows host from presenting `/root/...` as `E:\root\...`.
 
@@ -94,6 +100,7 @@ Passwords, MFA prompts, and first-use host-key confirmation are not bridged into
 - POSIX/Linux SSH hosts;
 - `@microsoft/agent-host-protocol` 0.7 client with the Resource and Terminal subset validated against AHP 0.8;
 - system OpenSSH configuration, SSH Agent, `known_hosts`, and `ProxyJump`.
+- local Visual Studio Code, Cursor, Windsurf, or VSCodium with a compatible Remote SSH extension for native remote file opening.
 
 See [the design document](docs/design.md) for routing, protocol, permissions, and lifecycle details.
 

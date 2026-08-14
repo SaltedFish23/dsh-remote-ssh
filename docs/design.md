@@ -5,7 +5,7 @@
 1. 不存在 `remote_read`、`remote_bash` 等平行工具；shell 名称按工作区 OS 选择（POSIX Remote 为 `bash`，Windows LOCAL 为 `pwsh`）。
 2. 当前 workspace cwd 是执行世界的唯一主选择器。
 3. 远端错误、断线、缺少程序和删除映射都 fail closed；禁止本机 fallback。
-4. alias 是稳定身份，不是同步目录或挂载点。
+4. alias 是稳定身份，不是同步目录或挂载点，也不得出现在模型或插件可见的文件路径中。
 5. Workspace/Session 是历史数据；删除执行映射不能删除历史。
 
 ## 组合结构
@@ -86,12 +86,19 @@ configured ──remove──► tombstoned
 | resolve/stat/lstat | resourceResolve |
 | read text/bytes | resourceRead |
 | guarded write/edit | resourceWrite createOnly / ifMatch |
+| exact-byte write | resourceWrite with internal base64 encoding plus createOnly / ifMatch |
 | list directory | resourceList |
 | mkdir/delete/move | 对应 Resource action |
 
-AHP etag 作为 opaque FsVersion，保持 read-before-write 和 stale-version 语义。`RemoteSshManager` 按 `serverId` 惰性创建一个 host runtime/AHP client；每个 workspace 只创建自己的 mapper、fs view 和 shell view。同主机 workspace 的 `remote` 对象引用相同。
+AHP etag 作为 opaque FsVersion，保持 read-before-write 和 stale-version 语义。`writeBytes` 接收插件已经持有的 `Uint8Array`；Remote SSH 只在调用 `resourceWrite` 时转换为 base64，模型参数、工具结果和工作区文件中都没有这层编码。`RemoteSshManager` 按 `serverId` 惰性创建一个 host runtime/AHP client；每个 workspace 只创建自己的 mapper、fs view 和 shell view。同主机 workspace 的 `remote` 对象引用相同。
 
 host runtime 请求 POSIX `/` Resource access，以实现 DSH 原生权限含义：Full Access 可跨 workspace；workspace-write 的 mutation 由 `RemoteSshFileSystem` 按每次调用的 `workspaceRoot` 检查；read-only 拒绝 mutation。AHP 授权范围不是 DSH workspace sandbox。
+
+## 远端文件打开
+
+Client 包装原有 `workspaces.openPath`，按文件 alias 或当前 Session 选择远端 Workspace。原生模式调用本机 VSC 兼容编辑器的标准 Remote SSH CLI：authority 为 `ssh-remote+<Host>`，文件名保持远端 POSIX 绝对路径。Windows 使用编辑器安装目录中的版本化 `resources/app/out/cli.js`，不会把 CLI 参数直接交给 GUI 入口。
+
+找不到兼容编辑器或 Remote SSH 扩展时，Host 通过现有 AHP filesystem 读取文件，将按内容寻址的快照写入插件专用临时目录，再交给原有本机 `openPath`。下载上限默认 64 MiB。原生编辑器连接由其 Remote SSH 扩展自行管理，与插件的 SSH/AHP 长连接相互独立。
 
 ## 进程与 shell
 

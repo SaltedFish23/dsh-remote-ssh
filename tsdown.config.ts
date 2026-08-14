@@ -8,6 +8,7 @@ export default [
       host: "src/host.ts",
       index: "src/index.ts",
       fs: "src/fs.ts",
+      "binary-fs": "src/binary-fs.ts",
       shell: "src/shell.ts",
       search: "src/search.ts",
       manager: "src/manager.ts",

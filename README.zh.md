@@ -13,8 +13,10 @@
 - 本机和远端使用同一个可编辑目录浏览器；
 - 工作区与终端调用显示为 `LOCAL > ...` 或 `<服务器> > ...`；
 - 文件系统、搜索、子进程、后台任务和终端都根据当前工作区透明路由；
+- 为 `dsh-codex` 生图等制品插件提供二进制工作区写入；原始字节只在 AHP `resourceWrite` 传输内部编码为 base64；
 - 远端搜索结果始终使用 POSIX 路径；超长工具结果保存在对应 SSH 主机的私有运行目录，可继续用 `read`/`grep` 分页读取；
 - POSIX 远端工作区只显示 `bash`，Windows 本机工作区只显示 `pwsh`；
+- 远端文件链接通过本机 VSC 兼容编辑器的 Remote SSH 打开；不可用时下载快照并在本机打开；
 - 每台服务器复用一条 SSH/AHP 长连接；每次 Bash 调用像 VS Code 新建终端标签页一样打开独立 channel，不会重新进行 SSH 握手；
 - 同一服务器上的多个工作区共享一个 host 级 SSH/AHP 连接；
 - 删除远端映射后保留可阅读的 Workspace 与 Session 历史，但旧会话不能继续调用工具。
@@ -50,6 +52,8 @@ Codex、Claude Code 及其他自动化 Agent 应直接遵循 [INSTALL.md](INSTAL
 
 如需使用非默认配置，在 **设置 → 插件 → Remote SSH → 自定义 SSH 配置文件** 中填写绝对路径。
 
+远端文件链接默认自动选择可用的 VSC 兼容编辑器。也可以在 **设置 → 插件 → Remote SSH → 远端文件打开方式** 中指定编辑器，或始终下载后在本机打开。
+
 远端主机需要：
 
 - POSIX shell，以及可非交互使用的 OpenSSH 连接；
@@ -62,6 +66,8 @@ Codex、Claude Code 及其他自动化 Agent 应直接遵循 [INSTALL.md](INSTAL
 ## 工作区行为
 
 当前工作区就是执行边界。远端会话中的绝对路径、可执行文件、shell 状态和搜索工具都在对应 SSH 主机上解析；即使本机存在同名文件或命令，也不会混用。
+
+远端文件系统结果只显示 POSIX 路径。本机 Workspace 身份目录不会作为文件路径展示给模型，也不会经由联动插件输出。
 
 工具结果超过内联上限时，远端会话的完整结果通过 AHP 写入该 SSH 主机的私有 runtime 目录，提示中的 locator 也是远端 POSIX 路径。本机 spill 后端仅供本机会话使用；未知或失效的会话不会回退到本机保存。`glob`/`grep` 的结果也会在官方工具执行后校正到远端 POSIX 路径，避免 Windows 宿主把 `/root/...` 显示成 `E:\root\...`。
 
@@ -94,6 +100,7 @@ Web UI 不桥接密码、MFA 和首次 host-key 确认。请先通过 OpenSSH �
 - POSIX/Linux SSH 主机；
 - `@microsoft/agent-host-protocol` 0.7 客户端，并已针对 AHP 0.8 验证 Resource 与 Terminal 子集；
 - 系统 OpenSSH 配置、SSH Agent、`known_hosts` 和 `ProxyJump`。
+- 使用原生远端文件打开方式时，本机需要装有 Visual Studio Code、Cursor、Windsurf 或 VSCodium，以及兼容的 Remote SSH 扩展。
 
 路由、协议、权限与生命周期细节见[设计文档](docs/design.md)。
 

@@ -9,7 +9,7 @@ import { WorkspacePathMapper } from '../src/index.ts'
 import RemoteSshFileSystem from '../src/fs.ts'
 import { describe, expect, it } from 'vitest'
 
-interface NodeEntry { type: 'file' | 'directory'; data: string; etag: string }
+interface NodeEntry { type: 'file' | 'directory'; data: string | Uint8Array; etag: string }
 
 class FakeAhp {
   readonly nodes = new Map<string, NodeEntry>([
@@ -36,7 +36,7 @@ class FakeAhp {
     const old = this.nodes.get(params.uri)
     if (params.createOnly === true && old !== undefined) throw new RpcError(AhpErrorCodes.AlreadyExists, 'exists')
     if (params.ifMatch !== undefined && old?.etag !== params.ifMatch) throw new RpcError(AhpErrorCodes.Conflict, 'stale')
-    const data = params.encoding === 'base64' ? Buffer.from(params.data, 'base64').toString() : params.data
+    const data = params.encoding === 'base64' ? Buffer.from(params.data, 'base64') : params.data
     this.nodes.set(params.uri, { type: 'file', data, etag: `v${++this.version}` })
     return {}
   }
@@ -65,11 +65,12 @@ async function setup() {
 }
 
 describe('RemoteSshFileSystem', () => {
-  it('resolves through AHP, reads text, and maps display paths to the local alias', async () => {
+  it('resolves through AHP while keeping the local alias out of display paths', async () => {
     const { ctx, fs, local } = await setup()
     const target = await fs.resolve('readme.txt', { cwd: local })
     expect(String(target.targetKey)).toBe('file:///srv/project/readme.txt')
-    expect(target.displayPath).toBe(resolve(local, 'readme.txt'))
+    expect(target.displayPath).toBe('/srv/project/readme.txt')
+    expect(target.displayPath).not.toContain(local)
     await expect(fs.readText(target)).resolves.toBe('hello\n')
   })
 
@@ -87,12 +88,26 @@ describe('RemoteSshFileSystem', () => {
     await expect(fs.readText(target)).resolves.toBe('gamma\n')
   })
 
+  it('publishes exact binary bytes through AHP base64 transport', async () => {
+    const { fs, client, local } = await setup()
+    const content = Uint8Array.from([0x00, 0xff, 0x42])
+    const target = await fs.resolve('asset.bin', { cwd: local })
+    const outcome = await fs.writeBytes(target, content, { kind: 'createIfAbsent' })
+
+    expect(outcome).toMatchObject({ operation: 'create', bytes: content.byteLength })
+    expect(client.nodes.get('file:///srv/project/asset.bin')?.data).toEqual(Buffer.from(content))
+  })
+
   it('enforces read-only mutation policy before issuing AHP writes', async () => {
-    const { ctx, fs, local } = await setup()
+    const { ctx, fs, client, local } = await setup()
     const target = await fs.resolve('readme.txt', { cwd: local })
     await expect(fs.writeText(target, 'blocked', undefined, undefined, {
       mode: 'read-only', workspaceRoot: local,
     })).rejects.toMatchObject({ code: 'FS_SANDBOX_DENIED' })
+    await expect(fs.writeBytes(target, Uint8Array.from([0xff]), undefined, undefined, {
+      mode: 'read-only', workspaceRoot: local,
+    })).rejects.toMatchObject({ code: 'FS_SANDBOX_DENIED' })
+    expect(client.nodes.get('file:///srv/project/readme.txt')?.data).toBe('hello\n')
   })
 
   it('allows cross-workspace writes only under danger-full-access', async () => {

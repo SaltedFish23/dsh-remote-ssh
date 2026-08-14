@@ -16,6 +16,7 @@ import type {
 } from '@deepseek-ai/dsh-fs'
 import z from '@deepseek-ai/schemastery'
 import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
+import type { FsBytesWriteOutcome } from './binary-fs.ts'
 import type { RemoteSshRuntime } from './index.ts'
 import { fileUriFromPosixPath, posixPathFromFileUri, WorkspacePathMapper } from './index.ts'
 
@@ -271,6 +272,56 @@ export class RemoteSshFileSystem extends FileSystem {
     })
   }
 
+  async writeBytes(
+    target: FsTarget,
+    content: Uint8Array,
+    expected?: FsWriteIntent,
+    signal?: AbortSignal,
+    sandboxPolicy?: SandboxExecutionPolicy,
+  ): Promise<FsBytesWriteOutcome> {
+    assertMutationAllowed(this.mapper, target, sandboxPolicy)
+    return this.withLock(String(target.targetKey), async () => {
+      throwIfAborted(signal, 'write')
+      const existing = await this.probe(target, true)
+      if (existing !== undefined && resourceType(existing.resolved.type) !== 'file') {
+        throw new FsError(`cannot write "${target.displayPath}": not a regular file`, 'FS_NOT_REGULAR_FILE')
+      }
+      if (expected?.kind === 'replaceIfVersion') {
+        if (existing === undefined || existing.version !== expected.version) {
+          throw new FsError(`cannot write "${target.displayPath}": file changed since it was read`, 'FS_STALE_VERSION')
+        }
+      } else if (expected?.kind === 'createIfAbsent' && existing !== undefined) {
+        throw new FsError(`cannot overwrite existing "${target.displayPath}" without reading it first`, 'FS_NOT_OBSERVED')
+      }
+      try {
+        const client = await this.remote.getClient()
+        await client.resourceWrite({
+          uri: this.fileUrl(target),
+          data: Buffer.from(content).toString('base64'),
+          encoding: BASE64,
+          contentType: 'application/octet-stream',
+          ...(expected?.kind === 'createIfAbsent' ? { createOnly: true } : {}),
+          ...(expected?.kind === 'replaceIfVersion' && existing?.resolved.etag !== undefined
+            ? { ifMatch: existing.resolved.etag }
+            : {}),
+        })
+      } catch (error: unknown) {
+        if (error instanceof RpcError && error.code === AhpErrorCodes.AlreadyExists) {
+          throw new FsError(`cannot overwrite existing "${target.displayPath}" without reading it first`, 'FS_NOT_OBSERVED', { cause: error })
+        }
+        throw mapFsError('write', target.displayPath, error)
+      }
+      throwIfAborted(signal, 'write')
+      const after = await this.probe(target, true)
+      if (after === undefined) throw new FsError(`write did not publish "${target.displayPath}"`, 'FS_IO_ERROR')
+      return {
+        operation: existing === undefined ? 'create' : 'update',
+        version: after.version,
+        bytes: content.byteLength,
+      }
+    })
+  }
+
   override async editText(
     target: FsTarget,
     edit: FsEditRequest,
@@ -324,7 +375,7 @@ export class RemoteSshFileSystem extends FileSystem {
     const uri = fileUriFromPosixPath(remotePath)
     return {
       targetKey: FsTargetKey(uri),
-      displayPath: this.mapper.toDisplayPath(remotePath),
+      displayPath: posix.normalize(remotePath),
     }
   }
 

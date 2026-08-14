@@ -161,6 +161,8 @@ Then:
 
 For a custom config, set its absolute path under **Settings → Plugins → Remote SSH**. Do not copy its contents into dsh settings.
 
+Under the same plugin settings, leave **Open remote files with** on auto-detect, choose a specific supported editor, or select the download-only fallback. Native opening requires that editor's compatible Remote SSH extension.
+
 ### 8. Verify transparent execution
 
 Create or open a disposable session in the new remote workspace. Verify with ordinary model-facing tools, not special remote tools:
@@ -172,6 +174,7 @@ Create or open a disposable session in the new remote workspace. Verify with ord
 - the tool card shows `<Server> > <workspace>`, not an internal UUID;
 - no `pwsh` tool is exposed for a POSIX/Linux remote workspace;
 - a local session still uses local files and `pwsh` on Windows.
+- a remote file link opens at the same POSIX path in the configured Remote SSH editor, or as a local snapshot when download-only mode is selected.
 
 Do not create or modify files outside the user-approved test workspace.
 
