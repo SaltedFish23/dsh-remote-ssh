@@ -198,7 +198,7 @@ async function editorInvocation(id: KnownEditorId | 'custom', executable: string
 export async function findWindowsVscCli(executable: string): Promise<string | undefined> {
   const root = dirname(executable)
   const direct = resolve(root, 'resources', 'app', 'out', 'cli.js')
-  if (await executableExists(direct)) return direct
+  if (await pathExists(direct)) return direct
   let children: string[]
   try {
     children = (await readdir(root, { withFileTypes: true }))
@@ -211,7 +211,7 @@ export async function findWindowsVscCli(executable: string): Promise<string | un
   }
   for (const child of children) {
     const candidate = resolve(root, child, 'resources', 'app', 'out', 'cli.js')
-    if (await executableExists(candidate)) return candidate
+    if (await pathExists(candidate)) return candidate
   }
   return undefined
 }
@@ -240,6 +240,15 @@ async function findExecutableOnPath(command: string): Promise<string | undefined
 async function executableExists(path: string): Promise<boolean> {
   try {
     await access(path, process.platform === 'win32' ? constants.F_OK : constants.X_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path, constants.F_OK)
     return true
   } catch {
     return false
