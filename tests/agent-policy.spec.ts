@@ -1,4 +1,9 @@
-import type { ToolCallView, ToolDefinition } from '@deepseek-ai/dsh-tools'
+import {
+  assertSupportedJsonSchema,
+  defineTool,
+  type JsonSchemaNode,
+  type ToolCallView,
+} from '@deepseek-ai/dsh-tools'
 import { describe, expect, it } from 'vitest'
 import { bashShellPresentation, presentRemoteShellCall } from '../src/agent-policy.ts'
 import type { RemoteWorkspaceRoute } from '../src/manager.ts'
@@ -12,7 +17,7 @@ const route = {
 describe('remote shell presentation', () => {
   it('restores the standard Bash description without replacing persistent execution', () => {
     const execute = async () => 'ok'
-    const base = {
+    const base = defineTool({
       name: 'bash',
       description: 'Run Bash in a persistent PTY.',
       parameters: {
@@ -23,16 +28,22 @@ describe('remote shell presentation', () => {
         render: () => [],
       },
       execute,
-      presentCall: (args: unknown): ToolCallView => ({
+      presentCall: (args): ToolCallView => ({
         card: 'terminal',
-        title: (args as { command: string }).command,
+        title: args.command,
       }),
-    } satisfies ToolDefinition
+    })
 
+    const baseExecute = base.execute
     const presented = bashShellPresentation(base)
 
-    expect(presented.execute).toBe(execute)
-    expect(presented.parameters.description).toMatchObject({ type: 'string', required: true })
+    expect(presented.execute).toBe(baseExecute)
+    expect(presented.parameters.description).toBeUndefined()
+    expect(presented.parameters.properties).toMatchObject({
+      description: { type: 'string' },
+    })
+    expect(presented.parameters.required).toEqual(['command', 'description'])
+    expect(() => assertSupportedJsonSchema(presented.parameters as JsonSchemaNode)).not.toThrow()
     expect(presented.presentCall?.({
       command: 'pwd && rg --version',
       description: 'Check current directory and rg availability',

@@ -40,7 +40,6 @@ export function apply(ctx: Context): void {
 
 const BASH_DESCRIPTION_PARAMETER = {
   type: 'string',
-  required: true,
   description: 'Clear, concise description of what this command does in active voice, '
     + '5-10 words (shown in the UI). Examples: "ls" → "List files in current directory"; '
     + '"git status" → "Show working tree status"; "npm install" → "Install package dependencies".',
@@ -50,16 +49,27 @@ const BASH_DESCRIPTION_PARAMETER = {
 export function bashShellPresentation(base: ToolDefinition): ToolDefinition {
   return {
     ...base,
-    parameters: {
-      ...base.parameters,
-      description: base.parameters.description ?? BASH_DESCRIPTION_PARAMETER,
-    },
+    parameters: bashDescriptionParameters(base.parameters),
     presentCall: args => {
       const view = base.presentCall?.(args)
       if (view?.card !== 'terminal' || view.description !== undefined) return view
       const description = shellDescription(args)
       return description === undefined ? view : { ...view, description }
     },
+  }
+}
+
+function bashDescriptionParameters(parameters: Record<string, unknown>): Record<string, unknown> {
+  const properties = isRecord(parameters.properties) ? parameters.properties : {}
+  const required = Array.isArray(parameters.required) ? [...parameters.required] : []
+  if (!required.includes('description')) required.push('description')
+  return {
+    ...parameters,
+    properties: {
+      ...properties,
+      description: properties.description ?? BASH_DESCRIPTION_PARAMETER,
+    },
+    required,
   }
 }
 
@@ -102,6 +112,10 @@ function shellDescription(args: unknown): string | undefined {
   if (args === null || typeof args !== 'object' || Array.isArray(args)) return undefined
   const value = (args as { description?: unknown }).description
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 export default apply
