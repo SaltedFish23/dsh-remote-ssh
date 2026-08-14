@@ -8,6 +8,7 @@ import { AhpClient } from '@microsoft/agent-host-protocol/client'
 import { WebSocketTransport } from '@microsoft/agent-host-protocol/ws'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import { ahpProtocolMismatch, DSH_AHP_PROTOCOL_VERSIONS, formatAhpProtocolMismatch } from './ahp-compat.ts'
 
 export interface Config {
   sshTarget: string
@@ -50,17 +51,27 @@ export function buildRemoteAgentHostCommand(remoteCodeCommand: string): string {
   const requested = quotePosix(remoteCodeCommand)
   return [
     `dsh_code=${requested}`,
+    'if [ "$dsh_code" = code ] && ! command -v "$dsh_code" >/dev/null 2>&1 && [ -x "$HOME/.dsh-remote-ssh/cli/bin/code" ]; then dsh_code="$HOME/.dsh-remote-ssh/cli/bin/code"; fi',
     'if ! command -v "$dsh_code" >/dev/null 2>&1; then printf \'dsh-remote-ssh: VS Code CLI not found: %s\\n\' "$dsh_code" >&2; exit 127; fi',
-    'exec "$dsh_code" agent host --host 127.0.0.1 --port 0 --server-data-dir "$HOME/.dsh-remote-ssh/server" --cli-data-dir "$HOME/.dsh-remote-ssh/cli" --verbose',
+    'exec "$dsh_code" agent host --host 127.0.0.1 --port 0 --idle-timeout 60 --server-data-dir "$HOME/.dsh-remote-ssh/server" --cli-data-dir "$HOME/.dsh-remote-ssh/cli" --verbose',
   ].join('\n')
 }
 
+/** List installed VS Code Server entrypoints newest-first for compatibility probing. */
+export function buildListEmbeddedAgentHostsCommand(): string {
+  return 'find "$HOME/.vscode-server/cli/servers" -type f -path \'*/server/bin/code-server\' -perm -u+x -printf \'%T@ %p\\n\' 2>/dev/null | sort -nr | cut -d \' \' -f 2-'
+}
+
 /** Build the fallback bootstrap for a VS Code Server installation left by Remote - SSH. */
-export function buildEmbeddedAgentHostCommand(): string {
+export function buildEmbeddedAgentHostCommand(codeServerPath?: string, instanceId = 'default'): string {
+  if (!/^[a-zA-Z0-9._-]+$/.test(instanceId)) throw new Error(`invalid embedded Agent Host instance id: ${instanceId}`)
+  const resolveCodeServer = codeServerPath === undefined
+    ? `dsh_code_server=$(${buildListEmbeddedAgentHostsCommand()} | head -n 1)`
+    : `dsh_code_server=${quotePosix(codeServerPath)}`
   return [
-    'dsh_code_server=$(find "$HOME/.vscode-server/cli/servers" -type f -path \'*/server/bin/code-server\' -perm -u+x -printf \'%T@ %p\\n\' 2>/dev/null | sort -nr | head -n 1 | cut -d \' \' -f 2-)',
+    resolveCodeServer,
     'if [ -z "$dsh_code_server" ]; then printf \'dsh-remote-ssh: no usable code agent host or VS Code Server code-server found\\n\' >&2; exit 127; fi',
-    'exec "$dsh_code_server" --host 127.0.0.1 --port 0 --agent-host-port 0 --accept-server-license-terms --server-data-dir "$HOME/.dsh-remote-ssh/server-embedded" --log info',
+    `exec "$dsh_code_server" --host 127.0.0.1 --port 0 --agent-host-port 0 --accept-server-license-terms --server-data-dir "$HOME/.dsh-remote-ssh/server-embedded/${instanceId}" --log info`,
   ].join('\n')
 }
 
@@ -143,7 +154,7 @@ export class RemoteSshRuntime extends Service {
     remoteRuntimeRoot: z.string().default('/tmp/dsh-remote-ssh'),
     startupTimeoutMs: z.number().default(600_000),
     requestTimeoutMs: z.number().default(30_000),
-    protocolVersions: z.array(z.string()).default(['0.8.0', '0.7.0', '0.6.0', '0.5.0', '0.4.0']),
+    protocolVersions: z.array(z.string()).default([...DSH_AHP_PROTOCOL_VERSIONS]),
     directUrl: z.string(),
   })
 
@@ -225,7 +236,11 @@ export class RemoteSshRuntime extends Service {
   }
 
   private async open(): Promise<AhpConnection> {
-    const url = this.config.directUrl ?? await this.startOverSsh()
+    if (this.config.directUrl !== undefined) return this.connectEndpoint(this.config.directUrl)
+    return this.openOverSsh()
+  }
+
+  private async connectEndpoint(url: string): Promise<AhpConnection> {
     const transport = await WebSocketTransport.connect(url)
     const client = new AhpClient(transport, { requestTimeoutMs: this.config.requestTimeoutMs })
     client.connect()
@@ -247,36 +262,82 @@ export class RemoteSshRuntime extends Service {
       }
     } catch (error: unknown) {
       await client.shutdown().catch(() => {})
-      throw new Error('dsh-remote-ssh: VS Code Agent Host AHP handshake failed', { cause: error })
+      throw error
     }
   }
 
-  private async startOverSsh(): Promise<string> {
+  private async openOverSsh(): Promise<AhpConnection> {
+    const diagnostics: string[] = []
     const startupCommand = buildRemoteAgentHostCommand(this.config.remoteCodeCommand)
-    const startup = await runCaptured(
-      this.config.sshExecutable,
-      [...this.config.sshArgs, '-T', this.config.sshTarget, startupCommand],
-      this.config.startupTimeoutMs,
-    )
+    let startup: CapturedProcess
+    try {
+      startup = await runCaptured(
+        this.config.sshExecutable,
+        [...this.config.sshArgs, '-T', this.config.sshTarget, startupCommand],
+        this.config.startupTimeoutMs,
+      )
+    } catch (error: unknown) {
+      if (this.config.remoteCodeCommand !== 'code') throw error
+      diagnostics.push(`standalone CLI: ${errorMessage(error)}`)
+      startup = { exitCode: null, stdout: '', stderr: '' }
+    }
     const clean = stripAnsi(`${startup.stdout}\n${startup.stderr}`)
     const endpoint = /ws:\/\/(?:localhost|127\.0\.0\.1):(\d+)\?tkn=([^\s]+)/.exec(clean)
     if (endpoint?.[1] !== undefined && endpoint[2] !== undefined) {
-      return this.openTunnel(Number(endpoint[1]), endpoint[2])
+      try {
+        const url = await this.openTunnel(Number(endpoint[1]), endpoint[2])
+        return await this.connectEndpoint(url)
+      } catch (error: unknown) {
+        this.resetSshAttempt()
+        diagnostics.push(`standalone CLI: ${connectionDiagnostic(error, this.config.protocolVersions)}`)
+        if (this.config.remoteCodeCommand !== 'code') {
+          throw new Error(`dsh-remote-ssh: configured VS Code Agent Host failed\n${diagnostics.at(-1)}`, { cause: error })
+        }
+      }
+    } else if (clean.trim().length > 0) {
+      diagnostics.push(`standalone CLI (ssh exit ${startup.exitCode ?? 'unknown'}): ${tailDiagnostic(clean)}`)
     }
 
     // A Remote - SSH server installation exposes bin/remote-cli/code, but that
     // wrapper deliberately refuses ordinary SSH sessions. Its sibling
-    // bin/code-server can host the same official Agent Host directly.
-    if (this.config.remoteCodeCommand === 'code') return this.startEmbeddedAgentHost(clean)
-    throw new Error(`dsh-remote-ssh: remote VS Code Agent Host failed to start (ssh exit ${startup.exitCode})\n${clean}`)
+    // bin/code-server can host the same official Agent Host directly. Probe
+    // every installed build newest-first: a newer VS Code may speak a protocol
+    // that the bundled AHP client has not adopted yet, while an older compatible
+    // build remains usable.
+    if (this.config.remoteCodeCommand !== 'code') {
+      throw new Error(`dsh-remote-ssh: remote VS Code Agent Host failed to start (ssh exit ${startup.exitCode})\n${clean}`)
+    }
+    const candidates = await this.listEmbeddedAgentHosts()
+    for (const [index, codeServerPath] of candidates.entries()) {
+      try {
+        const url = await this.startEmbeddedAgentHost(codeServerPath, index)
+        return await this.connectEndpoint(url)
+      } catch (error: unknown) {
+        this.resetSshAttempt()
+        diagnostics.push(`embedded ${codeServerPath}: ${connectionDiagnostic(error, this.config.protocolVersions)}`)
+      }
+    }
+    if (candidates.length === 0) diagnostics.push('embedded VS Code Server: no installed code-server found')
+    throw new Error(`dsh-remote-ssh: no compatible VS Code Agent Host found\n${diagnostics.join('\n')}`)
   }
 
-  private async startEmbeddedAgentHost(standaloneOutput: string): Promise<string> {
+  private async listEmbeddedAgentHosts(): Promise<string[]> {
+    const result = await runCaptured(
+      this.config.sshExecutable,
+      [...this.config.sshArgs, '-T', this.config.sshTarget, buildListEmbeddedAgentHostsCommand()],
+      Math.min(this.config.startupTimeoutMs, 30_000),
+    )
+    if (result.exitCode !== 0) return []
+    return [...new Set(result.stdout.split(/\r?\n/u).map(path => path.trim()).filter(Boolean))]
+  }
+
+  private async startEmbeddedAgentHost(codeServerPath: string, attempt: number): Promise<string> {
+    const instanceId = `${this.clientId}-${attempt}`
     const child = spawn(this.config.sshExecutable, [
       ...this.config.sshArgs,
       '-T',
       this.config.sshTarget,
-      buildEmbeddedAgentHostCommand(),
+      buildEmbeddedAgentHostCommand(codeServerPath, instanceId),
     ], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
     this.embeddedAgentHost = child
     let remotePort: number
@@ -284,11 +345,11 @@ export class RemoteSshRuntime extends Service {
       remotePort = await waitForAgentHostPort(child, this.config.startupTimeoutMs)
     } catch (error: unknown) {
       child.kill()
-      throw new Error(`dsh-remote-ssh: embedded VS Code Agent Host failed after standalone startup output\n${standaloneOutput}`, { cause: error })
+      throw error
     }
     const tokenResult = await runCaptured(
       this.config.sshExecutable,
-      [...this.config.sshArgs, '-T', this.config.sshTarget, 'cat "$HOME/.dsh-remote-ssh/server-embedded/data/token"'],
+      [...this.config.sshArgs, '-T', this.config.sshTarget, `cat "$HOME/.dsh-remote-ssh/server-embedded/${instanceId}/data/token"`],
       Math.min(this.config.startupTimeoutMs, 30_000),
     )
     const token = tokenResult.stdout.trim()
@@ -318,6 +379,13 @@ export class RemoteSshRuntime extends Service {
     this.tunnel = tunnel
     await waitForPort(localPort, tunnel, 15_000)
     return `ws://127.0.0.1:${localPort}?tkn=${encodeURIComponent(token)}`
+  }
+
+  private resetSshAttempt(): void {
+    this.tunnel?.kill()
+    this.tunnel = undefined
+    this.embeddedAgentHost?.kill()
+    this.embeddedAgentHost = undefined
   }
 }
 
@@ -393,6 +461,20 @@ async function waitForAgentHostPort(child: ChildProcessWithoutNullStreams, timeo
 
 function stripAnsi(value: string): string {
   return value.replace(/\x1B(?:[@-_][0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g, '')
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function tailDiagnostic(value: string, maxLength = 2_000): string {
+  const clean = stripAnsi(value).trim()
+  return clean.length <= maxLength ? clean : `…${clean.slice(-maxLength)}`
+}
+
+function connectionDiagnostic(error: unknown, offeredVersions: readonly string[]): string {
+  const mismatch = ahpProtocolMismatch(error, offeredVersions)
+  return mismatch === undefined ? tailDiagnostic(errorMessage(error)) : `AHP protocol mismatch: ${formatAhpProtocolMismatch(mismatch)}`
 }
 
 async function reservePort(): Promise<number> {

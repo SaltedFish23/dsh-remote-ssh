@@ -20,8 +20,12 @@ export function apply(ctx: Context): void {
 
     try {
       agent.ctx.tools.restrict({ deny: [hiddenDialect] })
-      if (route?.kind === 'remote' && base !== undefined) {
-        agent.ctx.tools.register(remoteShellPresentation(base, manager, route))
+      if (base !== undefined && (dialect === 'bash' || route?.kind === 'remote')) {
+        const described = dialect === 'bash' ? bashShellPresentation(base) : base
+        const presented = route?.kind === 'remote'
+          ? remoteShellPresentation(described, manager, route)
+          : described
+        agent.ctx.tools.register(presented)
       }
     } catch (error) {
       manager.unbindSession(sessionId, agent)
@@ -32,6 +36,31 @@ export function apply(ctx: Context): void {
   ctx.on('agent/disposed', ({ agent }) => {
     ctx.remoteSshManager.unbindSession(String(agent.session.header.id), agent)
   })
+}
+
+const BASH_DESCRIPTION_PARAMETER = {
+  type: 'string',
+  required: true,
+  description: 'Clear, concise description of what this command does in active voice, '
+    + '5-10 words (shown in the UI). Examples: "ls" → "List files in current directory"; '
+    + '"git status" → "Show working tree status"; "npm install" → "Install package dependencies".',
+} as const
+
+/** Restore the ordinary Bash call summary while retaining the persistent PTY executor. */
+export function bashShellPresentation(base: ToolDefinition): ToolDefinition {
+  return {
+    ...base,
+    parameters: {
+      ...base.parameters,
+      description: base.parameters.description ?? BASH_DESCRIPTION_PARAMETER,
+    },
+    presentCall: args => {
+      const view = base.presentCall?.(args)
+      if (view?.card !== 'terminal' || view.description !== undefined) return view
+      const description = shellDescription(args)
+      return description === undefined ? view : { ...view, description }
+    },
+  }
 }
 
 /** Shadow only presentation; execution remains the ordinary bash tool and transparent shell. */
@@ -67,6 +96,12 @@ function shellWorkdir(args: unknown): string | undefined {
   if (args === null || typeof args !== 'object' || Array.isArray(args)) return undefined
   const value = (args as { workdir?: unknown }).workdir
   return typeof value === 'string' ? value : undefined
+}
+
+function shellDescription(args: unknown): string | undefined {
+  if (args === null || typeof args !== 'object' || Array.isArray(args)) return undefined
+  const value = (args as { description?: unknown }).description
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined
 }
 
 export default apply

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   WorkspacePathMapper,
   buildEmbeddedAgentHostCommand,
+  buildListEmbeddedAgentHostsCommand,
   buildRemoteAgentHostCommand,
   fileUriFromPosixPath,
   posixPathFromFileUri,
@@ -36,10 +37,14 @@ describe('WorkspacePathMapper', () => {
   it('keeps the standalone and embedded VS Code Agent Host bootstraps distinct', () => {
     const command = buildRemoteAgentHostCommand('code')
     expect(command).not.toContain('remote-cli/code')
+    expect(command).toContain('$HOME/.dsh-remote-ssh/cli/bin/code')
+    expect(command).toContain('--idle-timeout 60')
     expect(command).toContain('exec "$dsh_code" agent host')
     const embedded = buildEmbeddedAgentHostCommand()
     expect(embedded).toContain('$HOME/.vscode-server/cli/servers')
     expect(embedded).toContain('server/bin/code-server')
     expect(embedded).toContain('--agent-host-port 0')
+    expect(buildListEmbeddedAgentHostsCommand()).toContain("sort -nr")
+    expect(buildEmbeddedAgentHostCommand('/opt/vscode server/bin/code-server', 'attempt-1')).toContain("'/opt/vscode server/bin/code-server'")
   })
 })

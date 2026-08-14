@@ -2,6 +2,7 @@ import { resolve } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
+import { SettingsProvider } from '@deepseek-ai/dsh-settings'
 import RemoteSshManager from '../lib/manager.js'
 import TransparentFileSystem from '../lib/router-fs.js'
 import TransparentSubprocessRuntime from '../lib/router-subprocess.js'
@@ -15,8 +16,19 @@ if (!sshTarget || !remoteWorkspace) {
 
 const local = new Context()
 const ctx = new Context()
+
+class MemorySettings extends SettingsProvider {
+  storedDocument = {}
+  get writable() { return true }
+  async load() { return structuredClone(this.storedDocument) }
+  async persist(namespace, section) {
+    this.storedDocument = { ...this.storedDocument, [namespace]: structuredClone(section) }
+  }
+}
+
 await local.plugin(LocalSubprocessRuntime, {})
 await local.plugin(LocalFileSystem, { cwd: process.cwd() })
+await ctx.plugin(MemorySettings).await()
 ctx.provide('localFs', local.fs)
 ctx.provide('localSubprocess', local.subprocess)
 

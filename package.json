@@ -1,7 +1,11 @@
 {
   "name": "dsh-remote-ssh",
-  "version": "0.1.1",
-  "description": "DeepSeek Harness Remote SSH provider backed by VS Code Agent Host Protocol",
+  "version": "0.1.2",
+  "description": "Transparent local and Remote SSH workspaces for DeepSeek Harness",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Yan-Zero/dsh-remote-ssh.git"
@@ -18,7 +22,8 @@
     "build": "pnpm run typecheck && tsdown",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.client.json",
-    "check": "pnpm run typecheck && pnpm run test && pnpm run build"
+    "check": "pnpm run typecheck && pnpm run test && pnpm run build",
+    "prepublishOnly": "pnpm --config.minimum-release-age=0 run check"
   },
   "exports": {
     ".": { "types": "./lib/host.d.ts", "default": "./lib/host.js" },
@@ -37,7 +42,7 @@
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
-  "files": ["lib", "src", "scripts", "cordis.patch.yml", "README.md", "docs"],
+  "files": ["lib", "src", "scripts", "cordis.patch.yml", "README.md", "README.zh.md", "INSTALL.md", "docs"],
   "license": "Apache-2.0",
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" },
@@ -77,7 +82,7 @@
     "@deepseek-ai/schemastery": "^3.18.1-rc.1"
   },
   "dependencies": {
-    "@microsoft/agent-host-protocol": "0.6.0"
+    "@microsoft/agent-host-protocol": "0.7.0"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.1",

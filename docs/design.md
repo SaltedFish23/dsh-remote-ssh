@@ -108,6 +108,12 @@ Remote `bash` 为每个 live Agent 创建一个持久 AHP Terminal。命令直�
 
 OpenSSH 仅用于 host runtime 的 bootstrap 与 tunnel。POSIX 本机可用短 ControlPath、`ControlMaster=auto` 与 `ControlPersist=60` 合并启动阶段的 SSH 会话；Windows 自带 OpenSSH 和 Git OpenSSH 在实测中会 reset multiplex session，因此 Windows 禁用 ControlMaster。两种平台进入 AHP ready 状态后，普通 fs、shell、搜索、subprocess 和 PTY 都走 host 长连接，不存在逐命令握手。
 
+## Agent Host 版本策略
+
+`@microsoft/agent-host-protocol` 的正式支持版本和经真实集成验证的 forward protocol 只在 `src/ahp-compat.ts` 合并。运行时不根据“最新版”猜测兼容性，而以 `initialize` 握手为准。默认 bootstrap 顺序为 PATH `code` / 私有 CLI、随后是远端缓存的所有 VS Code Server `code-server`（按新到旧）；协议不匹配会清理本次 tunnel/host 并继续下一个候选。
+
+私有 CLI 是唯一由插件生命周期管理层关注的远端可执行文件。CLI 通过官方更新服务管理 Agent Host 的下载、缓存与空闲更新；插件不覆盖 Server 文件。CLI 更新与 AHP SDK 更新分别执行，兼容握手和旧 Server 缓存构成升级安全网。
+
 ## 本地 picker 的 UTF-16 兼容层
 
 上游 `@deepseek-ai/dsh-host-directory-picker-native@0.1.0-rc.6` 的 Windows worker 只检查 UTF-16LE 码元低字节是否为零，会截断含“开”(U+5F00) 等字符的路径（discussion #396）。bundle 因此禁用 stock picker occupant，并注册 `directory-picker-native-fixed`：Windows 使用 STA FolderBrowserDialog，完整路径以 UTF-16LE Base64 跨进程返回；macOS/Linux 继续调用上游 `pickNativeDirectory`。这层只改变 host capability，不改变组合后的 LOCAL/Remote workspace 流。
@@ -117,7 +123,7 @@ OpenSSH 仅用于 host runtime 的 bootstrap 与 tunnel。POSIX 本机可用短 
 - alias tombstoned：明确报映射已移除；
 - SSH 认证/网络失败：返回 ssh 错误，不切 local；
 - 远端 executable 缺失：远端 exit 127，不查本机；
-- AHP bootstrap/协议失败：远端 fs 调用失败；
+- 所有已安装 Agent Host 候选均无法启动/协商：列出客户端 offered versions 与 Server accepted ranges 后失败；
 - restrictive shell policy：明确拒绝；
 - remote `rg` 缺失：普通 glob/grep 工具失败；
 - mapper 收到远端 alias 外路径：拒绝，避免把本机路径发送到远端。

@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@microsoft/agent-host-protocol':
-        specifier: 0.6.0
-        version: 0.6.0
+        specifier: 0.7.0
+        version: 0.7.0
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: 4.0.1
@@ -885,8 +885,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@microsoft/agent-host-protocol@0.6.0':
-    resolution: {integrity: sha512-ckr9XLadXmUfF2lWSwTMu+VoJH0l8qbLfsWuoL7riIOGFCBml4JWIZYeIrPl18xrfbdeM4u2Jlu/OVjz8qbUpQ==}
+  '@microsoft/agent-host-protocol@0.7.0':
+    resolution: {integrity: sha512-sUBNkYTwvAxUWHWMTe7XlE8MVYpLbeGe57Z3hQGqcaSL28JBqcEbmCaxxnx/x6G9i/rAQGJ4O6wJT3xcAFL7gg==}
 
   '@oxc-project/types@0.144.0':
     resolution: {integrity: sha512-nuhZIOLuI6TFQ32I/WnUx+SCPY7SdSKwgnFHydAuoS1+Z4BRcaP+RRJmGzl9lw+0OFF7UmaESf7KQRXaNLHypg==}
@@ -2763,7 +2763,7 @@ snapshots:
   '@koromix/koffi-win32-x64@3.1.4':
     optional: true
 
-  '@microsoft/agent-host-protocol@0.6.0': {}
+  '@microsoft/agent-host-protocol@0.7.0': {}
 
   '@oxc-project/types@0.144.0': {}
 
