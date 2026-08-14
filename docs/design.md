@@ -19,6 +19,8 @@ ordinary tools ─ routers ─┤
 ```
 
 - `TransparentFileSystem`：用 cwd/path 匹配 alias，委托本机 fs 或该 workspace 的 AHP fs；
+- `TransparentSpillStore`：按持有者 session 的固定执行域选择本机或远端 spill backend；远端结果写入 host runtime 私有目录；
+- `search`：在官方搜索模块加载时向路径解析入口注入远端 hook；远端绝对路径使用 POSIX 语义，本地路径继续走官方实现；
 - `TransparentSubprocessRuntime`：用 `spec.cwd` 选择本机 subprocess 或 host-scoped AHP subprocess；所有 stdin 模式都留在 AHP；
 - Remote `bash`：官方 `dsh-tool-bash` → Bash `ctx.shell` → 路由后的 AHP Terminal channel；所有 channel 复用 host 级 SSH/AHP 长连接，不重新握手；
 - `TransparentShellExecutor`：保留给非模型工具的 one-shot shell consumer；
@@ -57,6 +59,8 @@ Manager 维护 active routes 和 `remoteAliases` 历史集合。判定顺序：
 5. 其余：local。
 
 cwd 优先保证远端工作区中的相对路径始终在远端解释。对 POSIX 远端，alias 下的本地表现路径由 `WorkspacePathMapper` 转换为远端绝对路径。
+
+Spill 不参与普通 path 路由，而是只使用 Agent 创建时记录的 session world。远端 spill 通过既有 AHP Resource 权限写到 `remote.runtimeRoot/spills/session-<hash>/...`，目录和文件名均不可由模型选择；未知、已移除或未绑定的 session 失败关闭，不会转用宿主机 spill。
 
 ## 远端墓碑状态机
 

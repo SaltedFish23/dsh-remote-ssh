@@ -13,6 +13,7 @@ Choose `LOCAL > project` and ordinary file, search, shell, and background-task t
 - provides the same editable directory browser for local and remote folders;
 - labels workspaces and terminal calls as `LOCAL > ...` or `<Server> > ...`;
 - routes filesystem access, search, subprocesses, background jobs, and terminals by the active workspace;
+- keeps remote search results in POSIX path space and stores oversized tool results in a private runtime directory on the corresponding SSH host for follow-up `read`/`grep` access;
 - exposes `bash` for POSIX remote workspaces and `pwsh` for local Windows workspaces;
 - reuses one persistent SSH/AHP host connection while each Bash call opens its own terminal channel, like a new VS Code terminal tab;
 - shares one host-scoped SSH/AHP connection across workspaces on the same server;
@@ -61,6 +62,8 @@ The plugin checks `code` on PATH, its private `~/.dsh-remote-ssh/cli/bin/code` l
 ## How workspaces behave
 
 The active workspace is the execution boundary. A remote session resolves absolute paths, executables, shell state, and search tools on its SSH host—even when a local file or executable has the same name.
+
+When a tool result exceeds the inline budget, a remote session writes the complete result through AHP into that SSH host's private runtime directory and returns a remote POSIX locator. The local spill backend is used only for local sessions; an unknown or stale session never falls back to host storage. Stock `glob`/`grep` results are also normalized back into remote POSIX path space, preventing a Windows host from presenting `/root/...` as `E:\root\...`.
 
 Removing a remote mapping does not delete its local identity directory, Workspace record, Session, or message history. Old sessions remain readable, but new tool calls fail closed instead of accidentally running locally.
 

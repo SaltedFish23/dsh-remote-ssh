@@ -66,6 +66,11 @@ describe('RemoteSshManager', () => {
       const owner = {}
       manager.bindSession('remote-session', owner, resolve(root, 'project'))
 
+      expect(manager.sessionRoute('remote-session')).toMatchObject({
+        kind: 'remote',
+        workspace: { id: 'project' },
+      })
+
       expect(manager.routeShell('/srv/project/coffee', 'remote-session')).toMatchObject({
         kind: 'remote',
         workspace: { id: 'project' },
@@ -79,6 +84,7 @@ describe('RemoteSshManager', () => {
       manager.unbindSession('remote-session', otherOwner)
       expect(manager.routeShell('/outside', 'remote-session')).toMatchObject({ kind: 'remote' })
       manager.unbindSession('remote-session', owner)
+      expect(manager.sessionRoute('remote-session')).toBeUndefined()
       expect(manager.routeShell('/outside', 'remote-session')).toEqual({ kind: 'local' })
     } finally {
       await ctx.fiber.dispose()
@@ -97,6 +103,7 @@ describe('RemoteSshManager', () => {
       })
       const manager = ctx.remoteSshManager
       manager.bindSession('local-session', {}, resolve(root, '..', 'local'))
+      expect(manager.sessionRoute('local-session')).toEqual({ kind: 'local' })
       expect(manager.routeShell('/srv/project', 'local-session')).toEqual({ kind: 'local' })
     } finally {
       await ctx.fiber.dispose()

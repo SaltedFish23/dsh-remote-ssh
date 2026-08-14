@@ -351,16 +351,20 @@ export class RemoteSshManager extends Service {
     if (this.sessionWorlds.get(sessionId)?.owner === owner) this.sessionWorlds.delete(sessionId)
   }
 
+  /** Resolve the execution world bound to a live session without consulting path text. */
+  sessionRoute(sessionId: string): ExecutionRoute | undefined {
+    const bound = this.sessionWorlds.get(sessionId)
+    if (bound === undefined) return undefined
+    if (bound.removedAlias !== undefined) {
+      throw new Error(`dsh-remote-ssh: workspace alias is no longer configured: ${bound.removedAlias}`)
+    }
+    return bound.workspaceId === null ? { kind: 'local' } : this.workspace(bound.workspaceId)
+  }
+
   /** Resolve shell calls using their durable session world before considering workdir text. */
   routeShell(workdir: string, sessionId?: string): ExecutionRoute {
-    const bound = sessionId === undefined ? undefined : this.sessionWorlds.get(sessionId)
-    if (bound !== undefined) {
-      if (bound.removedAlias !== undefined) {
-        throw new Error(`dsh-remote-ssh: workspace alias is no longer configured: ${bound.removedAlias}`)
-      }
-      if (bound.workspaceId === null) return { kind: 'local' }
-      return this.workspace(bound.workspaceId)
-    }
+    const bound = sessionId === undefined ? undefined : this.sessionRoute(sessionId)
+    if (bound !== undefined) return bound
     return this.route(undefined, workdir)
   }
 

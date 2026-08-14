@@ -13,6 +13,8 @@ const BASE_ROWS: EntryOptions[] = [
   { id: 'tool-bash', name: '@deepseek-ai/dsh-tool-bash', disabled: true },
   { id: 'tool-pwsh', name: '@deepseek-ai/dsh-tool-pwsh', disabled: false },
   { id: 'tool-fs-search', name: '@deepseek-ai/dsh-tool-fs-search', disabled: true },
+  { id: 'agent-presets', name: '@deepseek-ai/dsh-agent-presets' },
+  { id: 'spill-local', name: '@deepseek-ai/dsh-spill-local' },
   { id: 'directory-picker', name: '@deepseek-ai/dsh-host-directory-picker-auto' },
   { id: 'sandbox-policy', name: '@deepseek-ai/dsh-sandbox-policy', config: {} },
   { id: 'approval', name: '@deepseek-ai/dsh-user-approval', config: {} },
@@ -33,7 +35,8 @@ describe('bundle overlay', () => {
     expect(byId.get('subprocess')).toMatchObject({ name: '@deepseek-ai/dsh-subprocess-local', disabled: true })
     expect(byId.get('fs-sandbox')).toMatchObject({ name: '@deepseek-ai/dsh-fs-sandbox', disabled: true })
     expect(byId.get('bash-sandbox')).toMatchObject({ name: '@deepseek-ai/dsh-bash-sandbox', disabled: true })
-    expect(byId.get('tool-fs-search')).toMatchObject({ name: '@deepseek-ai/dsh-tool-fs-search', disabled: false })
+    expect(byId.get('tool-fs-search')).toMatchObject({ name: '@deepseek-ai/dsh-tool-fs-search', disabled: true })
+    expect(byId.get('spill-local')).toMatchObject({ name: '@deepseek-ai/dsh-spill-local', disabled: true })
     expect(byId.get('remote-ssh-manager')).toMatchObject({ name: 'dsh-remote-ssh/manager' })
     expect(byId.get('remote-ssh-client-host')).toMatchObject({ name: 'dsh-remote-ssh' })
     expect(byId.get('remote-ssh-web')).toMatchObject({ name: 'dsh-remote-ssh/web' })
@@ -41,10 +44,21 @@ describe('bundle overlay', () => {
     expect(byId.get('remote-ssh-directory-browser')).toMatchObject({ name: '@deepseek-ai/dsh-host-directory-picker-browse' })
     expect(byId.get('remote-ssh-fs-router')).toMatchObject({ name: 'dsh-remote-ssh/router-fs' })
     expect(byId.get('remote-ssh-subprocess-router')).toMatchObject({ name: 'dsh-remote-ssh/router-subprocess' })
+    expect(byId.get('remote-ssh-spill-router')).toMatchObject({ name: 'dsh-remote-ssh/spill' })
+    expect(byId.get('remote-ssh-search')).toMatchObject({ name: 'dsh-remote-ssh/search' })
+    expect(byId.has('remote-ssh-tool-fs-search')).toBe(false)
+    expect(byId.get('agent-presets')).toMatchObject({
+      name: '@deepseek-ai/dsh-agent-presets',
+      inject: ['remoteSshSearchHook'],
+    })
     expect(byId.get('remote-ssh-shell-default')).toMatchObject({ name: 'dsh-remote-ssh/shell-transparent' })
     expect(byId.get('remote-ssh-bash')).toMatchObject({ name: 'cordis:group' })
     expect(byId.get('remote-ssh-pwsh')).toMatchObject({ name: 'cordis:group' })
     expect(byId.get('remote-ssh-agent-policy')).toMatchObject({ name: 'dsh-remote-ssh/agent-policy' })
+    const localWorld = byId.get('remote-ssh-local-world')
+    expect(localWorld).toMatchObject({ name: 'cordis:group' })
+    const localChildren = Array.isArray(localWorld?.config) ? localWorld.config as EntryOptions[] : []
+    expect(localChildren.find(row => row.id === 'local-spill')).toMatchObject({ name: '@deepseek-ai/dsh-spill-local' })
     const shellChildren = [byId.get('remote-ssh-bash'), byId.get('remote-ssh-pwsh')]
       .flatMap(row => Array.isArray(row?.config) ? row.config as EntryOptions[] : [])
     expect(shellChildren.map(row => row.id)).toEqual([

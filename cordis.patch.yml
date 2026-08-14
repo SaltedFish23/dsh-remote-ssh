@@ -15,15 +15,18 @@
       group: true
       isolate:
         fs: true
+        spillStore: true
         subprocess: true
       config:
         - id: local-subprocess
           name: '@deepseek-ai/dsh-subprocess-local'
         - id: local-fs
           name: '@deepseek-ai/dsh-fs-sandbox'
+        - id: local-spill
+          name: '@deepseek-ai/dsh-spill-local'
         - id: bridge
           name: dsh-remote-ssh/local-bridge
-          inject: [fs, subprocess]
+          inject: [fs, subprocess, spillStore]
 
     - id: remote-ssh-manager
       name: dsh-remote-ssh/manager
@@ -55,6 +58,14 @@
     - id: remote-ssh-subprocess-router
       name: dsh-remote-ssh/router-subprocess
       inject: [localSubprocess, remoteSshManager]
+
+    - id: remote-ssh-spill-router
+      name: dsh-remote-ssh/spill
+      inject: [localSpillStore, remoteSshManager]
+
+    - id: remote-ssh-search
+      name: dsh-remote-ssh/search
+      inject: [remoteSshManager]
 
     # Preserve the process-host dialect for non-tool shell consumers (hooks,
     # permission capability inspection). Visible bash/pwsh tools below each
@@ -127,7 +138,16 @@
   disabled: true
 
 - id: tool-fs-search
-  disabled: false
+  disabled: true
+
+# Existing/restored sessions cause presets to mount during startup. Hold the
+# roster until the module-load hook is active, so its scoped search tool is
+# parsed through the remote-aware path entry from its first import onward.
+- id: agent-presets
+  inject: [remoteSshSearchHook]
+
+- id: spill-local
+  disabled: true
 
 - id: directory-picker
   disabled: true
