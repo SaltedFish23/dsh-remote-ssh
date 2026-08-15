@@ -1,6 +1,6 @@
 {
   "name": "dsh-remote-ssh",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Transparent local and Remote SSH workspaces for DeepSeek Harness",
   "publishConfig": {
     "access": "public",
@@ -38,6 +38,7 @@
     "./local-bridge": { "types": "./lib/local-bridge.d.ts", "default": "./lib/local-bridge.js" },
     "./shell-transparent": { "types": "./lib/shell-transparent.d.ts", "default": "./lib/shell-transparent.js" },
     "./agent-policy": { "types": "./lib/agent-policy.d.ts", "default": "./lib/agent-policy.js" },
+    "./tui": { "types": "./lib/tui.d.ts", "default": "./lib/tui.js" },
     "./web": { "types": "./lib/web.d.ts", "default": "./lib/web.js" },
     "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",

@@ -1,9 +1,9 @@
 import { Context } from '@deepseek-ai/cordis'
 import { createScope, scopeOf } from '@deepseek-ai/dsh-scope'
 import SystemPrompt, { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
-import { defineTool, type ToolCallView } from '@deepseek-ai/dsh-tools'
+import { defineTool, type ToolCallView, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it } from 'vitest'
-import { installRemoteWorkspacePrompt, presentRemoteShellCall, remoteShellPresentation } from '../src/agent-policy.ts'
+import applyAgentPolicy, { installRemoteWorkspacePrompt, presentRemoteShellCall, remoteShellPresentation } from '../src/agent-policy.ts'
 import type { RemoteWorkspaceRoute } from '../src/manager.ts'
 
 const route = {
@@ -13,6 +13,51 @@ const route = {
 } as RemoteWorkspaceRoute
 
 describe('remote shell presentation', () => {
+  it('defers an existing Agent until both global shell tools are registered', () => {
+    const globals = new Map<string, ToolDefinition>()
+    let toolsChange = (): void => {}
+    let bindCalls = 0
+    let restricted: unknown
+    const agent = {
+      session: { header: { id: 'session-1', cwd: String.raw`E:\workspace` } },
+      ctx: {
+        tools: {
+          restrict: (filter: unknown) => { restricted = filter },
+          register: () => {},
+        },
+      },
+    }
+    const ctx = {
+      remoteSshManager: {
+        dialectFor: () => 'bash',
+        bindSession: () => { bindCalls += 1; return { kind: 'local' } },
+        unbindSession: () => {},
+      },
+      tools: { get: (name: string) => globals.get(name) },
+      agents: { list: () => [agent] },
+      on: (event: string, listener: (...args: never[]) => unknown) => {
+        if (event === 'tools/change') toolsChange = listener as () => void
+        return () => {}
+      },
+    }
+
+    applyAgentPolicy(ctx as never)
+    expect(bindCalls).toBe(0)
+    expect(restricted).toBeUndefined()
+
+    globals.set('bash', { name: 'bash' } as ToolDefinition)
+    toolsChange()
+    expect(bindCalls).toBe(0)
+
+    globals.set('pwsh', { name: 'pwsh' } as ToolDefinition)
+    toolsChange()
+    expect(bindCalls).toBe(1)
+    expect(restricted).toEqual({ deny: ['pwsh'] })
+
+    toolsChange()
+    expect(bindCalls).toBe(1)
+  })
+
   it('publishes only the remote cwd to the scoped System Prompt', async () => {
     const ctx = new Context()
     await ctx.plugin(SystemPrompt, { persona: 'Your working directory is {{cwd}}.' })

@@ -32,6 +32,7 @@ export interface RemoteSshWorkspace {
   serverId: string
   remotePath: string
   aliasPath?: string
+  title?: string
 }
 
 /** Host-side policy for file links produced inside a remote Session. */
@@ -135,6 +136,7 @@ const workspaceSchema: z<RemoteSshWorkspace> = z.object({
   serverId: z.string().required(),
   remotePath: z.string().required(),
   aliasPath: z.string(),
+  title: z.string(),
 })
 
 declare module '@deepseek-ai/cordis' {
@@ -313,6 +315,21 @@ export class RemoteSshManager extends Service {
     return route
   }
 
+  /** Rename one remote workspace without changing its execution route. */
+  async renameWorkspace(id: string, title: string): Promise<RemoteWorkspaceRoute> {
+    const normalizedTitle = title.trim()
+    if (normalizedTitle.length === 0) throw new Error('remote workspace title must not be empty')
+    const next = this.snapshot()
+    const workspace = next.workspaces.find(candidate => candidate.id === id)
+    if (workspace === undefined) throw new Error(`dsh-remote-ssh: unknown remote workspace '${id}'`)
+    workspace.title = normalizedTitle
+    this.validate(next)
+    await this.replaceSettings(next)
+    const route = this.routeByWorkspaceId.get(id)
+    if (route === undefined) throw new Error(`remote workspace '${id}' was not published`)
+    return route
+  }
+
   /** Remove execution routing while retaining alias, Workspace, and Session history. */
   async removeWorkspace(id: string): Promise<boolean> {
     const next = this.snapshot()
@@ -423,7 +440,8 @@ export class RemoteSshManager extends Service {
     const normalized = posix.normalize(remotePath)
     const workspaceRoot = posix.normalize(route.workspace.remotePath)
     const relativePath = posix.relative(workspaceRoot, normalized)
-    const workspaceTitle = `${route.server.label} > ${posix.basename(workspaceRoot) || workspaceRoot}`
+    const workspaceTitle = route.workspace.title
+      ?? `${route.server.label} > ${posix.basename(workspaceRoot) || workspaceRoot}`
     if (relativePath === '' || (relativePath !== '..' && !relativePath.startsWith('../') && !posix.isAbsolute(relativePath))) {
       return posix.join('/', workspaceTitle, relativePath)
     }
@@ -533,7 +551,8 @@ export class RemoteSshManager extends Service {
     const registry = this.workspaceRegistry
     if (registry === undefined) return
     for (const route of this.routeByWorkspaceId.values()) {
-      const title = `${route.server.label} > ${posix.basename(route.workspace.remotePath) || route.workspace.remotePath}`
+      const title = route.workspace.title
+        ?? `${route.server.label} > ${posix.basename(route.workspace.remotePath) || route.workspace.remotePath}`
       const workspace = await registry.create(route.aliasPath, title)
       if (workspace.title !== title) await workspace.setTitle(title)
     }
@@ -690,6 +709,7 @@ export class RemoteSshManager extends Service {
       if (!ID_PATTERN.test(workspace.id) || workspaceIds.has(workspace.id)) throw new Error(`dsh-remote-ssh: invalid or duplicate workspace id '${workspace.id}'`)
       if (!serverIds.has(workspace.serverId)) throw new Error(`dsh-remote-ssh: workspace '${workspace.id}' refers to unknown server '${workspace.serverId}'`)
       if (!posix.isAbsolute(workspace.remotePath)) throw new Error(`dsh-remote-ssh: workspace '${workspace.id}' remotePath must be an absolute POSIX path`)
+      if (workspace.title !== undefined && workspace.title.trim().length === 0) throw new Error(`dsh-remote-ssh: workspace '${workspace.id}' title must be non-empty`)
       const alias = normalizeLocal(resolve(workspace.aliasPath ?? resolve(config.aliasRoot, workspace.id)))
       if (aliases.has(alias)) throw new Error(`dsh-remote-ssh: duplicate workspace alias '${alias}'`)
       aliases.add(alias)

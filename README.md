@@ -32,6 +32,32 @@ dsh plugin --profile web add dsh-remote-ssh
 dsh web
 ```
 
+For the optional dsh-tui adapter, install the same bundle into that profile:
+
+```sh
+dsh plugin --profile dsh-tui add dsh-remote-ssh
+dsh-tui
+```
+
+Inside the TUI, `/workspace remote` (or `/workspace connect`) opens an SSH
+device picker and then a remote directory browser. Existing workspaces are
+listed by `/workspace resume`. A target can also be opened directly:
+
+In the directory browser, Enter selects the current directory. Press Tab on
+the first row to edit or paste an absolute remote path, then Enter to load it.
+
+```text
+/workspace open ssh://server-id/srv/project
+/workspace open ssh://user@example.com:2222/home/user/project
+```
+
+The launcher accepts the same URI (`dsh-tui ssh://server-id/srv/project`). A
+previously unknown direct target is saved to Remote SSH settings. Relative
+paths such as `/workspace open ../other-project` are resolved in the current remote
+POSIX path space, and `!command` executes through that workspace's remote shell.
+The adapter is optional: dsh-tui contains no SSH-specific protocol or UI code
+and continues to operate locally when this package is absent.
+
 From a DeepSeek Harness source checkout, use `pnpm dsh` in place of `dsh`. For local plugin development:
 
 ```sh

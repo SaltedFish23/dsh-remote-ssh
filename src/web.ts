@@ -20,10 +20,15 @@ export const REMOTE_SSH_DIRECTORY_PATH = '/plugins/dsh-remote-ssh/directory'
 export const REMOTE_SSH_OPEN_FILE_PATH = '/plugins/dsh-remote-ssh/open-file'
 
 export const name = 'dsh-remote-ssh-web'
-export const inject = ['remoteSshManager', 'webServer']
+export const inject = ['remoteSshManager']
+
+/** Activate the Web surface only in compositions that provide a Web host. */
+export function apply(ctx: Context): void {
+  ctx.inject(['webServer'], registerWebRoutes)
+}
 
 /** Register same-origin catalog mutation and connection-probe endpoints. */
-export function apply(ctx: Context): void {
+function registerWebRoutes(ctx: Context): void {
   const routes = [
     route(ctx, REMOTE_SSH_STATE_PATH, 'GET', async (_req, res) => {
       json(res, 200, await catalogState(ctx.remoteSshManager))

@@ -18,6 +18,7 @@ export default [
       "local-bridge": "src/local-bridge.ts",
       "shell-transparent": "src/shell-transparent.ts",
       "agent-policy": "src/agent-policy.ts",
+      tui: "src/tui.ts",
       web: "src/web.ts",
     },
     outDir: "lib",

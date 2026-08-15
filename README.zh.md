@@ -32,6 +32,29 @@ dsh plugin --profile web add dsh-remote-ssh
 dsh web
 ```
 
+如需启用可选的 dsh-tui 适配器，把同一个 bundle 安装到该 profile：
+
+```sh
+dsh plugin --profile dsh-tui add dsh-remote-ssh
+dsh-tui
+```
+
+进入 TUI 后，`/workspace remote`（或 `/workspace connect`）会先显示 SSH 设备列表，
+再浏览并选择远端目录；`/workspace resume` 列出已有工作区。也可以直接打开：
+
+目录浏览器中，Enter 选择当前目录；在第一行按 Tab 可以编辑或粘贴远端绝对路径，
+再按 Enter 读取该目录。
+
+```text
+/workspace open ssh://server-id/srv/project
+/workspace open ssh://user@example.com:2222/home/user/project
+```
+
+启动器也接受同一 URI（`dsh-tui ssh://server-id/srv/project`）。首次出现的直连
+目标会写入 Remote SSH 设置。`/workspace open ../other-project` 等相对路径在当前远端
+POSIX 路径空间内解析，`!command` 则通过当前工作区的远端 shell 执行。该适配器
+完全可选：dsh-tui 内没有 SSH 专属协议或界面代码，未安装本包时仍完整支持本地工作。
+
 从 DeepSeek Harness 源码 checkout 运行时，用 `pnpm dsh` 代替 `dsh`。本地开发插件时：
 
 ```sh

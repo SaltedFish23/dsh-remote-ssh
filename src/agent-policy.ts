@@ -1,23 +1,37 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type {} from '@deepseek-ai/dsh-agent'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { TerminalCallView, ToolCallView, ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { RemoteSshManager, RemoteWorkspaceRoute } from './manager.ts'
 
 export const name = 'dsh-remote-ssh-agent-policy'
-export const inject = ['remoteSshManager', 'systemPrompt', 'tools']
+export const inject = ['agents', 'remoteSshManager', 'systemPrompt', 'tools']
 
 /** Bind each live Agent to one execution world and expose only its native shell dialect. */
 export function apply(ctx: Context): void {
   const manager = ctx.remoteSshManager
+  const bound = new WeakSet<Agent>()
+  const pending = new Set<Agent>()
 
-  ctx.on('agent/created', ({ agent }) => {
-    const sessionId = String(agent.session.header.id)
+  const bind = (agent: Agent): boolean => {
+    if (bound.has(agent)) return true
     const cwd = agent.session.header.cwd
-    const route = manager.bindSession(sessionId, agent, cwd)
     const dialect = manager.dialectFor(cwd)
     const hiddenDialect = dialect === 'bash' ? 'pwsh' : 'bash'
-    const base = ctx.tools.get(dialect, agent)
+
+    // `tools` being mounted does not mean its tool plugins have registered.
+    // Loader rows start concurrently, and a front door may also have created
+    // an Agent already. Both global shell definitions must exist before a
+    // scoped restriction may name either one.
+    const base = ctx.tools.get(dialect)
+    if (base === undefined || ctx.tools.get(hiddenDialect) === undefined) {
+      pending.add(agent)
+      return false
+    }
+
+    pending.delete(agent)
+    const sessionId = String(agent.session.header.id)
+    const route = manager.bindSession(sessionId, agent, cwd)
 
     try {
       if (route?.kind === 'remote') installRemoteWorkspacePrompt(agent.ctx, route)
@@ -25,13 +39,30 @@ export function apply(ctx: Context): void {
       if (base !== undefined && route?.kind === 'remote') {
         agent.ctx.tools.register(remoteShellPresentation(base, manager, route))
       }
+      bound.add(agent)
+      return true
     } catch (error) {
       manager.unbindSession(sessionId, agent)
       throw error
     }
+  }
+
+  ctx.on('agent/created', ({ agent }) => { bind(agent) })
+
+  // Tool registration emits this event synchronously. Only pending Agents
+  // are retried, and bind removes an Agent before installing scoped effects,
+  // so its own presentation registration cannot recurse.
+  ctx.on('tools/change', () => {
+    for (const agent of [...pending]) bind(agent)
   })
 
+  // Front doors such as dsh-tui create their initial Agent during startup.
+  // Loader entries mount concurrently, so reconcile any Agent that won the
+  // race instead of depending on one event ordering.
+  for (const agent of ctx.agents.list()) bind(agent)
+
   ctx.on('agent/disposed', ({ agent }) => {
+    pending.delete(agent)
     ctx.remoteSshManager.unbindSession(String(agent.session.header.id), agent)
   })
 }

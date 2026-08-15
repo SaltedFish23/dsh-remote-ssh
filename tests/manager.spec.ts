@@ -77,6 +77,10 @@ describe('RemoteSshManager', () => {
         workspace: { id: 'project', remotePath: '/srv/project' },
       })
       expect(ctx.remoteSshManager.route(resolve(root, '..', 'local'), resolve(root, '..', 'local'))).toEqual({ kind: 'local' })
+      const renamed = await ctx.remoteSshManager.renameWorkspace('project', 'Backend')
+      expect(renamed.workspace.title).toBe('Backend')
+      expect(ctx.remoteSshManager.snapshot().workspaces[0]?.title).toBe('Backend')
+      expect(ctx.remoteSshManager.displayRemoteCwd(renamed)).toBe('/Backend')
     } finally {
       await ctx.fiber.dispose()
       await rm(root, { recursive: true, force: true })

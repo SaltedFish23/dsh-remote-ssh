@@ -39,7 +39,10 @@ describe('bundle overlay', () => {
     expect(byId.get('spill-local')).toMatchObject({ name: '@deepseek-ai/dsh-spill-local', disabled: true })
     expect(byId.get('remote-ssh-manager')).toMatchObject({ name: 'dsh-remote-ssh/manager' })
     expect(byId.get('remote-ssh-client-host')).toMatchObject({ name: 'dsh-remote-ssh' })
-    expect(byId.get('remote-ssh-web')).toMatchObject({ name: 'dsh-remote-ssh/web' })
+    expect(byId.get('remote-ssh-web')).toMatchObject({
+      name: 'dsh-remote-ssh/web',
+      inject: ['remoteSshManager'],
+    })
     expect(byId.get('directory-picker')).toMatchObject({ disabled: true })
     expect(byId.get('remote-ssh-directory-browser')).toMatchObject({ name: '@deepseek-ai/dsh-host-directory-picker-browse' })
     expect(byId.get('remote-ssh-fs-router')).toMatchObject({ name: 'dsh-remote-ssh/router-fs' })
@@ -55,6 +58,10 @@ describe('bundle overlay', () => {
     expect(byId.get('remote-ssh-bash')).toMatchObject({ name: 'cordis:group' })
     expect(byId.get('remote-ssh-pwsh')).toMatchObject({ name: 'cordis:group' })
     expect(byId.get('remote-ssh-agent-policy')).toMatchObject({ name: 'dsh-remote-ssh/agent-policy' })
+    expect(byId.get('remote-ssh-tui')).toMatchObject({
+      name: 'dsh-remote-ssh/tui',
+      inject: ['remoteSshManager'],
+    })
     const localWorld = byId.get('remote-ssh-local-world')
     expect(localWorld).toMatchObject({ name: 'cordis:group' })
     const localChildren = Array.isArray(localWorld?.config) ? localWorld.config as EntryOptions[] : []
