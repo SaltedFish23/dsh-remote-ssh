@@ -18,6 +18,7 @@ export const REMOTE_SSH_CONFIG_HOST_PATH = '/plugins/dsh-remote-ssh/ssh-config/h
 export const REMOTE_SSH_SETTINGS_PATH = '/plugins/dsh-remote-ssh/settings'
 export const REMOTE_SSH_DIRECTORY_PATH = '/plugins/dsh-remote-ssh/directory'
 export const REMOTE_SSH_OPEN_FILE_PATH = '/plugins/dsh-remote-ssh/open-file'
+export const REMOTE_SSH_BACKEND_CONNECT_PATH = '/plugins/dsh-remote-ssh/backend/connect'
 
 export const name = 'dsh-remote-ssh-web'
 export const inject = ['remoteSshManager']
@@ -85,6 +86,16 @@ function registerWebRoutes(ctx: Context): void {
       const body = await readJson(req)
       const server = await resolveAvailableServer(ctx.remoteSshManager, requiredString(body, 'id'))
       json(res, 200, await probeServer(server.sshTarget, server.sshArgs ?? []))
+    }),
+    route(ctx, REMOTE_SSH_BACKEND_CONNECT_PATH, 'POST', async (req, res) => {
+      const body = await readJson(req)
+      const server = await resolveAvailableServer(ctx.remoteSshManager, requiredString(body, 'id'))
+      const backend = await ctx.remoteSshManager.connectBackend(server, ctx.webServer.port)
+      json(res, 200, {
+        url: backend.url,
+        localPort: backend.localPort,
+        remotePort: backend.remotePort,
+      })
     }),
     route(ctx, REMOTE_SSH_CONFIG_HOST_PATH, 'POST', async (req, res) => {
       const body = await readJson(req)

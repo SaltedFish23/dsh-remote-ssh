@@ -4,6 +4,11 @@ English | [中文](README.zh.md)
 
 Use SSH hosts as transparent workspaces in [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
 
+Remote SSH has two compatible modes. A remote workspace keeps the AI runtime
+local and transparently routes its tools through AHP. **Open Backend** attaches
+a new local observer window to a complete persistent Harness running on the
+SSH host through [dsh-host](https://github.com/Yan-Zero/dsh-host).
+
 Choose `LOCAL > project` and ordinary file, search, shell, and background-task tools run locally. Choose `<Server> > project` and those same tools run on that SSH host. There is no second set of `remote_*` tools, and a remote failure never falls back to the local machine.
 
 ## Features
@@ -19,6 +24,7 @@ Choose `LOCAL > project` and ordinary file, search, shell, and background-task t
 - opens remote file links in an installed VS Code-compatible editor through its Remote SSH extension, with a local downloaded snapshot as fallback;
 - reuses one persistent SSH/AHP host connection while each Bash call opens its own terminal channel, like a new VS Code terminal tab;
 - shares one host-scoped SSH/AHP connection across workspaces on the same server;
+- opens a complete remote Backend over one persistent SSH connection carrying startup, authentication, HTTP, and WebSocket forwarding;
 - preserves readable Workspace and Session history after a remote mapping is removed, while rejecting new tool calls from the old session.
 
 Remote workspaces currently support POSIX/Linux hosts. Windows SSH hosts are not yet supported.
@@ -86,6 +92,11 @@ The remote host needs:
 - `bash`, `base64`, and `mkfifo` for shell and subprocess execution;
 - `rg` for glob and grep tools;
 - a VS Code Agent Host supplied by the official VS Code CLI or an existing VS Code Server installation.
+
+The full Backend mode instead requires `dsh-host`, installed by its private
+POSIX installer. Select **Open Backend** beside the SSH host; the resulting Web
+window is only an observer, while sessions, tools, jobs, and storage remain on
+the server. Closing the window or SSH attachment does not stop the Backend.
 
 The plugin checks `code` on PATH, its private `~/.dsh-remote-ssh/cli/bin/code` location, and compatible VS Code Server installations already cached on the host. It does not install remote packages silently.
 

@@ -32,6 +32,7 @@
     "./shell": { "types": "./lib/shell.d.ts", "default": "./lib/shell.js" },
     "./search": { "types": "./lib/search.d.ts", "default": "./lib/search.js" },
     "./manager": { "types": "./lib/manager.d.ts", "default": "./lib/manager.js" },
+    "./backend": { "types": "./lib/backend.d.ts", "default": "./lib/backend.js" },
     "./router-fs": { "types": "./lib/router-fs.d.ts", "default": "./lib/router-fs.js" },
     "./router-subprocess": { "types": "./lib/router-subprocess.d.ts", "default": "./lib/router-subprocess.js" },
     "./spill": { "types": "./lib/spill.d.ts", "default": "./lib/spill.js" },

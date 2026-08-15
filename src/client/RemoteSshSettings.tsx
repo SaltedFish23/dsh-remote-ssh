@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { ReactElement } from 'react'
 import {
-  CONFIG_HOST_PATH, DIRECTORY_PATH, emptyCatalog, PROBE_PATH, request, STATE_PATH,
+  BACKEND_CONNECT_PATH, CONFIG_HOST_PATH, DIRECTORY_PATH, emptyCatalog, PROBE_PATH, request, STATE_PATH,
   WORKSPACE_PATH, WORKSPACE_REMOVE_PATH,
 } from './api.ts'
 import type { CatalogState, RemoteDirectoryListing } from './api.ts'
@@ -49,6 +49,19 @@ export function RemoteSshSettings({ t: optionalT }: LocalizedProps): ReactElemen
       ? t('probeSuccess', { hostname: result.hostname ?? id, commands })
       : t('probeFailure', { error: result.error ?? t('unknownError') }))
   }
+  const openBackend = async (id: string): Promise<void> => {
+    const observer = window.open('about:blank', '_blank')
+    if (observer === null) throw new Error(t('popupBlocked'))
+    observer.opener = null
+    try {
+      const result = await request<{ url: string }>(BACKEND_CONNECT_PATH, 'POST', { id })
+      observer.location.replace(result.url)
+      setMessage(t('backendOpened'))
+    } catch (error) {
+      observer.close()
+      throw error
+    }
+  }
 
   return <section style={page}>
     <div>
@@ -66,6 +79,7 @@ export function RemoteSshSettings({ t: optionalT }: LocalizedProps): ReactElemen
           <small style={{ display: 'block', color: 'var(--dsw-alias-label-secondary)' }}>{server.configPath ?? t('savedServer')}</small>
         </span>
         <button style={button} onClick={() => { void probe(server.id) }}>{t('test')}</button>
+        <button style={button} aria-label={`${t('openBackend')} · ${server.label}`} onClick={() => { void openBackend(server.id).catch(error => { setMessage(String(error)) }) }}>{t('openBackend')}</button>
       </div>)}
       {state.servers.length === 0 ? <p style={dim}>{t('noHosts')}</p> : null}
       <div style={row}>

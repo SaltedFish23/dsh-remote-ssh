@@ -12,6 +12,7 @@ export default [
       shell: "src/shell.ts",
       search: "src/search.ts",
       manager: "src/manager.ts",
+      backend: "src/backend.ts",
       "router-fs": "src/router-fs.ts",
       "router-subprocess": "src/router-subprocess.ts",
       spill: "src/spill.ts",

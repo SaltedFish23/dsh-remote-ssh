@@ -15,6 +15,7 @@ import z from '@deepseek-ai/schemastery'
 import RemoteSshFileSystem from './fs.ts'
 import RemoteSshRuntime, { fileUriFromPosixPath, posixPathFromFileUri, WorkspacePathMapper } from './index.ts'
 import RemoteSshShellExecutor from './shell.ts'
+import { DEFAULT_DSH_BACKEND_PORT, RemoteDshBackend } from './backend.ts'
 
 /** One SSH destination visible in Settings and workspace selection. */
 export interface RemoteSshServer {
@@ -24,6 +25,8 @@ export interface RemoteSshServer {
   sshArgs?: string[]
   remoteCodeCommand?: string
   sshExecutable?: string
+  /** Stable remote loopback port used by the full dsh-host Backend. */
+  backendPort?: number
 }
 
 /** Durable projection from one local alias directory to one remote directory. */
@@ -129,6 +132,7 @@ const serverSchema: z<RemoteSshServer> = z.object({
   sshArgs: z.array(z.string()),
   remoteCodeCommand: z.string(),
   sshExecutable: z.string(),
+  backendPort: z.number(),
 })
 
 const workspaceSchema: z<RemoteSshWorkspace> = z.object({
@@ -174,6 +178,7 @@ export class RemoteSshManager extends Service {
   private readonly contexts = new Map<string, Promise<RemoteWorkspaceContext>>()
   private readonly shellContexts = new Map<string, Promise<RemoteWorkspaceShellContext>>()
   private readonly hosts = new Map<string, Promise<RemoteHostContext>>()
+  private readonly backends = new Map<string, Promise<RemoteDshBackend>>()
   private readonly sessionWorlds = new Map<string, {
     owner: object
     workspaceId: string | null
@@ -222,6 +227,9 @@ export class RemoteSshManager extends Service {
       const hosts = await Promise.allSettled(this.hosts.values())
       await Promise.allSettled(hosts.flatMap(result => result.status === 'fulfilled' ? [this.disposeHost(result.value)] : []))
       this.hosts.clear()
+      const backends = await Promise.allSettled(this.backends.values())
+      await Promise.allSettled(backends.flatMap(result => result.status === 'fulfilled' ? [result.value.dispose()] : []))
+      this.backends.clear()
     }, 'Remote SSH workspace context teardown')
   }
 
@@ -473,6 +481,33 @@ export class RemoteSshManager extends Service {
     return this.transportFor(route.server)
   }
 
+  /**
+   * Attach the browser observer to a complete remote Harness Backend. A single
+   * SSH process starts/reuses dsh-host, carries the forward, and stays alive.
+   */
+  async connectBackend(server: RemoteSshServer, localUiPort: number): Promise<RemoteDshBackend> {
+    const key = backendRuntimeKey(server, localUiPort)
+    let pending = this.backends.get(key)
+    if (pending !== undefined) {
+      const existing = await pending.catch(() => undefined)
+      if (existing?.alive === true) return existing
+      if (existing !== undefined) await existing.dispose()
+      this.backends.delete(key)
+    }
+    const transport = this.transportFor(server)
+    pending = RemoteDshBackend.open({
+      sshExecutable: transport.executable,
+      sshArgs: transport.args,
+      sshTarget: server.sshTarget,
+      remotePort: server.backendPort ?? DEFAULT_DSH_BACKEND_PORT,
+      startupTimeoutMs: this.current.startupTimeoutMs,
+      localUiPort,
+    })
+    this.backends.set(key, pending)
+    void pending.catch(() => { if (this.backends.get(key) === pending) this.backends.delete(key) })
+    return pending
+  }
+
   /** AHP-backed shell view sharing the host runtime but retaining workspace path mapping. */
   async workspaceShell(route: RemoteWorkspaceRoute, dialect: 'bash' | 'pwsh'): Promise<ShellExecutor> {
     const key = `${route.workspace.id}:${dialect}`
@@ -537,6 +572,15 @@ export class RemoteSshManager extends Service {
       if (next === undefined || settled === undefined || settled.key !== serverRuntimeKey(next)) {
         if (settled !== undefined) await this.disposeHost(settled)
         this.hosts.delete(id)
+      }
+    }
+    for (const [key, pending] of this.backends) {
+      const [serverId, expectedRuntimeKey] = JSON.parse(key) as [string, string, number]
+      const next = servers.get(serverId)
+      if (next === undefined || serverRuntimeKey(next) !== expectedRuntimeKey) {
+        const settled = await Promise.resolve(pending).catch(() => undefined)
+        if (settled !== undefined) await settled.dispose()
+        this.backends.delete(key)
       }
     }
     this.routes.clear()
@@ -701,6 +745,9 @@ export class RemoteSshManager extends Service {
       if (!ID_PATTERN.test(server.id) || serverIds.has(server.id)) throw new Error(`dsh-remote-ssh: invalid or duplicate server id '${server.id}'`)
       if (server.label.trim().length === 0 || server.sshTarget.trim().length === 0) throw new Error(`dsh-remote-ssh: server '${server.id}' requires label and sshTarget`)
       if (server.sshExecutable !== undefined && server.sshExecutable.trim().length === 0) throw new Error(`dsh-remote-ssh: server '${server.id}' sshExecutable must be non-empty`)
+      if (server.backendPort !== undefined && (!Number.isSafeInteger(server.backendPort) || server.backendPort < 1 || server.backendPort > 65535)) {
+        throw new Error(`dsh-remote-ssh: server '${server.id}' backendPort must be between 1 and 65535`)
+      }
       serverIds.add(server.id)
     }
     const workspaceIds = new Set<string>()
@@ -719,7 +766,11 @@ export class RemoteSshManager extends Service {
 }
 
 function serverRuntimeKey(server: RemoteSshServer): string {
-  return JSON.stringify([server.sshTarget, server.sshArgs ?? [], server.remoteCodeCommand ?? 'code', server.sshExecutable ?? null])
+  return JSON.stringify([server.sshTarget, server.sshArgs ?? [], server.remoteCodeCommand ?? 'code', server.sshExecutable ?? null, server.backendPort ?? DEFAULT_DSH_BACKEND_PORT])
+}
+
+function backendRuntimeKey(server: RemoteSshServer, localUiPort: number): string {
+  return JSON.stringify([server.id, serverRuntimeKey(server), localUiPort])
 }
 
 function routeRuntimeKey(route: RemoteWorkspaceRoute): string {
