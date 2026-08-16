@@ -125,6 +125,21 @@ OpenSSH 仅用于 host runtime 的 bootstrap 与 tunnel。POSIX 本机可用短 
 
 payload hash 相同则复用现有 generation；hash 变化才 `--replace`。安装锁把并发 attach/升级串行化，因此正常状态下每个远端 OS 用户只有一个 Remote SSH Host，固定远端端口也不再是身份或生命周期依据。
 
+`RemoteDshHostConnection` 是稳定逻辑连接，`RemoteDshHostTunnel` 只表示一次 SSH。
+Tunnel 退出会触发共享的、带抖动指数退避重连；并发消费者等待同一个 attempt。
+Web adapter 保留原 gateway URL，并为新请求解析当前 tunnel；通用 Client 会重新打开
+Mux/Host WebSocket 流。连接边界上失败的 unary mutation 不自动重放，避免远端其实
+已执行时产生重复副作用。插件退出会取消正在进行的 SSH bootstrap。
+
+dsh-tui 只提供 UI 中性的 `tuiBackends` registry 和命令分发入口。Remote SSH 在该
+service 存在时注册 Host Channel provider；registry 支持晚注册和卸载，现有 TUI binding
+会在本地 Channel 与远端 Channel 间切换，同时保持交给界面的 Channel 对象身份稳定。
+Remote SSH bundle 的 `tui-backend` 条目本身只强依赖 UI 中性的 manager，并在内部观察
+可选的 `tuiBackends`；因此同一个 bundle 装入 Web profile 时也能完成激活，不会等待 TUI
+专属 service。
+因此 bundle 无需定向修改 `dsh-tui` 行，也没有源码 loader hook；未安装 Remote SSH 时，
+registry 直接委托原本的本地 Channel。
+
 ## Agent Host 版本策略
 
 `@microsoft/agent-host-protocol` 的正式支持版本和经真实集成验证的 forward protocol 只在 `src/ahp-compat.ts` 合并。运行时不根据“最新版”猜测兼容性，而以 `initialize` 握手为准。默认 bootstrap 顺序为 PATH `code` / 私有 CLI、随后是远端缓存的所有 VS Code Server `code-server`（按新到旧）；协议不匹配会清理本次 tunnel/host 并继续下一个候选。

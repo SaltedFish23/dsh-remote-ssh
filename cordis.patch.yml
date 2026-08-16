@@ -42,6 +42,14 @@
             ? [{ id: 'default', serverId: 'default', remotePath: process.env.DSH_REMOTE_SSH_WORKSPACE, ...(process.env.DSH_REMOTE_SSH_LOCAL_WORKSPACE ? { aliasPath: process.env.DSH_REMOTE_SSH_LOCAL_WORKSPACE } : {}) }]
             : []
 
+    # Optional Remote Host adapter for dsh-tui's public backend registry.
+    # Only the manager is an entry-level dependency: the plugin observes the
+    # optional tuiBackends service internally, so this same bundle also boots
+    # in Web and other UI-neutral profiles where dsh-tui is absent.
+    - id: remote-ssh-tui-backend
+      name: dsh-remote-ssh/tui-backend
+      inject: [remoteSshManager]
+
     - id: remote-ssh-web
       name: dsh-remote-ssh/web
       inject: [remoteSshManager]

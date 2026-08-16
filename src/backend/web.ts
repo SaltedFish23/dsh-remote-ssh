@@ -5,19 +5,29 @@ import { createServer, request as httpRequest, type IncomingMessage, type Server
 import { Socket } from 'node:net'
 import type { Duplex } from 'node:stream'
 import {
-  DEFAULT_DSH_HOST_PORT,
-  RemoteDshHostTunnel,
-  type RemoteDshHostTunnelConfig,
-} from './tunnel.ts'
+  RemoteDshHostConnection,
+  type RemoteDshHostConnectionConfig,
+} from './connection.ts'
+import { DEFAULT_DSH_HOST_PORT } from './tunnel.ts'
+import {
+  REMOTE_BACKEND_CONTEXT_PATH,
+  REMOTE_SSH_LOCAL_CONTROL_PATHS,
+  type RemoteBackendContext,
+} from '../backend-context.ts'
 
 export { buildDshBackendCommand } from './install.ts'
 export { RemoteDshHostTunnel } from './tunnel.ts'
 export type { RemoteDshHostTunnelConfig } from './tunnel.ts'
+export { RemoteDshHostConnection } from './connection.ts'
+export type { RemoteDshHostConnectionConfig } from './connection.ts'
 
 export const DEFAULT_DSH_BACKEND_PORT = DEFAULT_DSH_HOST_PORT
 const COOKIE_PREFIX = 'dsh_remote_backend_'
+// Use the browser's standard trustworthy loopback origin. Remote identity is
+// a protocol concern and must not depend on hostname/cookie edge cases.
+const REMOTE_BROWSER_HOST = 'localhost'
 
-export interface RemoteWebProxyConfig extends RemoteDshHostTunnelConfig {
+export interface RemoteWebProxyConfig extends RemoteDshHostConnectionConfig {
   localUiPort: number
 }
 
@@ -32,59 +42,64 @@ export interface RemoteWebProxyAttachment {
 /** Serve local Web assets and proxy the unchanged Host protocol on one origin. */
 export class RemoteDshWebProxy implements RemoteWebProxyAttachment {
   readonly localPort: number
-  readonly remotePort: number
   readonly url: string
 
   private disposed = false
 
   private constructor(
-    private readonly tunnel: RemoteDshHostTunnel,
+    private readonly connection: RemoteDshHostConnection,
     private readonly gateway: Server,
     localPort: number,
-    remotePort: number,
+    private readonly initialRemotePort: number,
     gatewayToken: string,
     private readonly sockets: Set<Duplex>,
     private readonly ownsTunnel: boolean,
   ) {
     this.localPort = localPort
-    this.remotePort = remotePort
-    this.url = `http://127.0.0.1:${String(localPort)}/?tkn=${encodeURIComponent(gatewayToken)}`
+    this.url = `http://${REMOTE_BROWSER_HOST}:${String(localPort)}/?tkn=${encodeURIComponent(gatewayToken)}`
   }
 
   get alive(): boolean {
-    return !this.disposed && this.tunnel.alive && this.gateway.listening
+    return !this.disposed && this.connection.alive && this.gateway.listening
+  }
+
+  get remotePort(): number {
+    return this.connection.connected ? this.connection.remotePort : this.initialRemotePort
   }
 
   static async open(config: RemoteWebProxyConfig): Promise<RemoteDshWebProxy> {
-    const tunnel = await RemoteDshHostTunnel.open(config)
+    const connection = await RemoteDshHostConnection.open(config)
     try {
-      return await this.attachInternal(tunnel, config.localUiPort, true)
+      return await this.attachInternal(connection, config.localUiPort, true)
     } catch (error) {
-      await tunnel.dispose()
+      await connection.dispose()
       throw error
     }
   }
 
   /** Add the browser same-origin proxy without taking ownership of the SSH tunnel. */
-  static attach(tunnel: RemoteDshHostTunnel, localUiPort: number): Promise<RemoteDshWebProxy> {
-    return this.attachInternal(tunnel, localUiPort, false)
+  static attach(connection: RemoteDshHostConnection, localUiPort: number): Promise<RemoteDshWebProxy> {
+    return this.attachInternal(connection, localUiPort, false)
   }
 
   private static async attachInternal(
-    tunnel: RemoteDshHostTunnel,
+    connection: RemoteDshHostConnection,
     localUiPort: number,
     ownsTunnel: boolean,
   ): Promise<RemoteDshWebProxy> {
-    const remoteToken = tunnel.requestHeaders()['x-dsh-host-token']
-    if (remoteToken === undefined) throw new Error('dsh-remote-ssh: Host tunnel did not provide credentials')
+    const tunnel = await connection.ready()
 
     const gatewayToken = randomBytes(32).toString('hex')
     const cookieName = `${COOKIE_PREFIX}${gatewayToken.slice(0, 16)}`
     const sockets = new Set<Duplex>()
     const gateway = createGateway({
       localUiPort,
-      forwardPort: tunnel.localPort,
-      remoteToken,
+      resolveRemote: async () => {
+        const active = await connection.ready()
+        const token = active.requestHeaders()['x-dsh-host-token']
+        if (token === undefined) throw new Error('dsh-remote-ssh: Host tunnel did not provide credentials')
+        return { port: active.localPort, token }
+      },
       gatewayToken,
       cookieName,
       sockets,
@@ -94,7 +109,7 @@ export class RemoteDshWebProxy implements RemoteWebProxyAttachment {
     } catch (error) { throw error }
     const address = gateway.address()
     if (address === null || typeof address === 'string') throw new Error('dsh-remote-ssh: Web proxy has no TCP address')
-    return new RemoteDshWebProxy(tunnel, gateway, address.port, tunnel.remotePort, gatewayToken, sockets, ownsTunnel)
+    return new RemoteDshWebProxy(connection, gateway, address.port, tunnel.remotePort, gatewayToken, sockets, ownsTunnel)
   }
 
   async dispose(): Promise<void> {
@@ -103,14 +118,13 @@ export class RemoteDshWebProxy implements RemoteWebProxyAttachment {
     const closed = new Promise<void>(resolve => { this.gateway.close(() => { resolve() }) })
     this.gateway.closeAllConnections()
     for (const socket of this.sockets) socket.destroy()
-    await Promise.all([closed, ...(this.ownsTunnel ? [this.tunnel.dispose()] : [])])
+    await Promise.all([closed, ...(this.ownsTunnel ? [this.connection.dispose()] : [])])
   }
 }
 
 interface GatewayOptions {
   localUiPort: number
-  forwardPort: number
-  remoteToken: string
+  resolveRemote(): Promise<{ port: number; token: string }>
   gatewayToken: string
   cookieName: string
   sockets: Set<Duplex>
@@ -120,22 +134,33 @@ function createGateway(options: GatewayOptions): Server {
   const server = createServer((req, res) => {
     if (exchangeToken(req, res, options.gatewayToken, options.cookieName)) return
     if (!cookieMatches(req, options.gatewayToken, options.cookieName)) return unauthorized(res)
-    proxyHttp(req, res, proxyTarget(req, options), options.remoteToken)
+    const pathname = new URL(req.url ?? '/', 'http://dsh.invalid').pathname
+    if (pathname === REMOTE_BACKEND_CONTEXT_PATH) return backendContext(res)
+    if (REMOTE_SSH_LOCAL_CONTROL_PATHS.has(pathname)) return localRemoteSshUnavailable(res)
+    void proxyTarget(req, options).then(
+      target => { proxyHttp(req, res, target) },
+      () => { unavailable(res) },
+    )
   })
   server.on('upgrade', (req, socket, head) => {
     if (!cookieMatches(req, options.gatewayToken, options.cookieName)) { socket.destroy(); return }
     options.sockets.add(socket)
     socket.once('close', () => { options.sockets.delete(socket) })
-    proxyUpgrade(req, socket, head, proxyTarget(req, options), options.remoteToken, options.sockets)
+    void proxyTarget(req, options).then(
+      target => { proxyUpgrade(req, socket, head, target, options.sockets) },
+      () => { socket.destroy() },
+    )
   })
   return server
 }
 
-function proxyTarget(req: IncomingMessage, options: GatewayOptions): { port: number; remote: boolean } {
+async function proxyTarget(req: IncomingMessage, options: GatewayOptions): Promise<{ port: number; remote: boolean; token?: string }> {
   const pathname = new URL(req.url ?? '/', 'http://dsh.invalid').pathname
   const remote = pathname === '/api' || pathname.startsWith('/api/')
     || pathname === '/dsh-host' || pathname.startsWith('/dsh-host/')
-  return { port: remote ? options.forwardPort : options.localUiPort, remote }
+  if (!remote) return { port: options.localUiPort, remote: false }
+  const target = await options.resolveRemote()
+  return { port: target.port, remote: true, token: target.token }
 }
 
 function proxyHeaders(req: IncomingMessage, port: number, remote: boolean, remoteToken: string): Record<string, string | string[] | undefined> {
@@ -154,10 +179,10 @@ export type RemoteBackendAttachment = RemoteWebProxyAttachment
 /** @deprecated Use RemoteDshWebProxy. */
 export { RemoteDshWebProxy as RemoteDshBackend }
 
-function proxyHttp(req: IncomingMessage, res: ServerResponse, target: { port: number; remote: boolean }, remoteToken: string): void {
+function proxyHttp(req: IncomingMessage, res: ServerResponse, target: { port: number; remote: boolean; token?: string }): void {
   const upstream = httpRequest({
     host: '127.0.0.1', port: target.port, method: req.method, path: req.url,
-    headers: proxyHeaders(req, target.port, target.remote, remoteToken),
+    headers: proxyHeaders(req, target.port, target.remote, target.token ?? ''),
   }, response => {
     const headers = { ...response.headers }
     delete headers['set-cookie']
@@ -175,13 +200,12 @@ function proxyUpgrade(
   req: IncomingMessage,
   socket: Duplex,
   head: Buffer,
-  target: { port: number; remote: boolean },
-  remoteToken: string,
+  target: { port: number; remote: boolean; token?: string },
   sockets: Set<Duplex>,
 ): void {
   const upstream = httpRequest({
     host: '127.0.0.1', port: target.port, method: req.method, path: req.url,
-    headers: proxyHeaders(req, target.port, target.remote, remoteToken),
+    headers: proxyHeaders(req, target.port, target.remote, target.token ?? ''),
   })
   upstream.once('upgrade', response => {
     const upstreamSocket = response.socket as Socket
@@ -213,7 +237,11 @@ function exchangeToken(req: IncomingMessage, res: ServerResponse, expected: stri
   res.writeHead(302, {
     location,
     'cache-control': 'no-store',
-    'set-cookie': `${cookieName}=${expected}; HttpOnly; SameSite=Strict; Path=/`,
+    // The launcher page normally lives at 127.0.0.1 while this trustworthy
+    // gateway uses localhost. Chromium therefore marks the bootstrap redirect
+    // chain cross-site; Lax permits that top-level GET while still excluding
+    // cross-site subresource/API requests.
+    'set-cookie': `${cookieName}=${expected}; HttpOnly; SameSite=Lax; Path=/`,
   })
   res.end()
   return true
@@ -235,6 +263,28 @@ function safeEqual(expected: string, supplied: string | undefined): boolean {
 function unauthorized(res: ServerResponse): void {
   res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
   res.end('unauthorized')
+}
+
+function backendContext(res: ServerResponse): void {
+  const body: RemoteBackendContext = { attached: true, transport: 'ssh' }
+  res.writeHead(200, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+  })
+  res.end(JSON.stringify(body))
+}
+
+function localRemoteSshUnavailable(res: ServerResponse): void {
+  res.writeHead(409, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+  })
+  res.end(JSON.stringify({ error: 'Remote SSH controls are unavailable inside a remote Backend window.' }))
+}
+
+function unavailable(res: ServerResponse): void {
+  if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8', 'retry-after': '1' })
+  res.end('remote backend reconnecting')
 }
 
 async function listenLoopback(server: Server): Promise<void> {

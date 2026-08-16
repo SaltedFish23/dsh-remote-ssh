@@ -14,11 +14,14 @@ import type {
 } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { hostFrameSchema, muxFrameSchema } from '@deepseek-ai/dsh-host-apiproxy/api/events.schema'
 import { serverRequestSchema } from '@deepseek-ai/dsh-host-apiproxy/api/rpc.schema'
+import { parseProtocolDescription, type DshHostProtocolDescription } from './tunnel.js'
 
 export interface DshHostEndpoint {
   readonly origin: string
   requestHeaders(): Readonly<Record<string, string>>
   webSocketUrl(path: string): string
+  /** Present on reconnecting endpoints; resolves after a physical tunnel exists. */
+  ready?(signal?: AbortSignal): Promise<unknown>
 }
 
 type SocketItem<F> =
@@ -37,6 +40,11 @@ export interface HostExtensionResult<T = unknown> {
   }
 }
 
+export interface DownloadedSessionLog {
+  readonly fileName: string
+  readonly data: Uint8Array
+}
+
 /**
  * The same client works in a terminal, daemon, test runner, or another UI.
  * Core domains use Harness' typed ApiClient; extension RPC uses invoke().
@@ -52,10 +60,12 @@ export class RemoteDshHostClient extends AbstractApiClient {
     return this.endpoint.origin
   }
 
-  protected doFetch(input: URL, init: RequestInit = {}): Promise<Response> {
+  protected async doFetch(input: URL, init: RequestInit = {}): Promise<Response> {
+    await this.endpoint.ready?.(init.signal ?? undefined)
     const headers = new Headers(init.headers)
     for (const [name, value] of Object.entries(this.endpoint.requestHeaders())) headers.set(name, value)
-    return globalThis.fetch(input, { ...init, headers })
+    const target = new URL(`${input.pathname}${input.search}`, this.endpoint.origin)
+    return globalThis.fetch(target, { ...init, headers })
   }
 
   protected override openMux(
@@ -99,13 +109,71 @@ export class RemoteDshHostClient extends AbstractApiClient {
     return value
   }
 
+  /** Discover the execution authority and optional Host capabilities. */
+  async describeProtocol(signal?: AbortSignal): Promise<DshHostProtocolDescription> {
+    const response = await this.doFetch(new URL('/dsh-host/protocol', this.resolveBase()), {
+      ...(signal === undefined ? {} : { signal }),
+    })
+    if (!response.ok) throw new Error(`dsh-host protocol discovery failed with HTTP ${String(response.status)}`)
+    return parseProtocolDescription(await response.json())
+  }
+
+  /** Download the Host's canonical Session ZIP through the authenticated carrier. */
+  async downloadSessionLog(
+    sessionId: string,
+    includeDescendants = true,
+    signal?: AbortSignal,
+  ): Promise<DownloadedSessionLog> {
+    const query = new URLSearchParams({ sessionId, includeDescendants: String(includeDescendants) })
+    const response = await this.doFetch(new URL(`/api/session.export?${query.toString()}`, this.resolveBase()), {
+      ...(signal === undefined ? {} : { signal }),
+    })
+    if (!response.ok) throw new Error(`dsh-host session export failed with HTTP ${String(response.status)}`)
+    const disposition = response.headers.get('content-disposition') ?? ''
+    const advertised = /filename="([^"]+)"/iu.exec(disposition)?.[1]
+    const fileName = safeDownloadName(advertised ?? `dsh-session-${sessionId}.zip`)
+    return { fileName, data: new Uint8Array(await response.arrayBuffer()) }
+  }
+
+  /** Invoke an extension and turn its failure envelope into a thrown error. */
+  async invokeValue<T = unknown>(
+    namespace: string,
+    method: string,
+    args: Readonly<Record<string, unknown>>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    const response = await this.invoke<T>(namespace, method, args, signal)
+    if (!response.result.ok) {
+      throw new RemoteDshHostRpcError(response.result.error.code, response.result.error.message, response.result.error.details)
+    }
+    return response.result.value as T
+  }
+
   private async *readWebSocket<F extends MuxFrame | HostFrame>(
     path: string,
     signal: AbortSignal,
     frameSchema: Parser<F>,
     onOpen?: () => void,
   ): AsyncGenerator<RpcRequest<F>> {
-    signal.throwIfAborted()
+    for (;;) {
+      signal.throwIfAborted()
+      await this.endpoint.ready?.(signal)
+      try {
+        yield* this.readWebSocketOnce(path, signal, frameSchema, onOpen)
+      } catch (error) {
+        if (signal.aborted || this.endpoint.ready === undefined) throw error
+      }
+      if (this.endpoint.ready === undefined) return
+      await reconnectDelay(signal)
+    }
+  }
+
+  private async *readWebSocketOnce<F extends MuxFrame | HostFrame>(
+    path: string,
+    signal: AbortSignal,
+    frameSchema: Parser<F>,
+    onOpen?: () => void,
+  ): AsyncGenerator<RpcRequest<F>> {
     const socket = new WebSocket(this.endpoint.webSocketUrl(path))
     const inbox: SocketItem<F>[] = []
     let wake: (() => void) | undefined
@@ -158,8 +226,36 @@ export class RemoteDshHostClient extends AbstractApiClient {
   }
 }
 
+export class RemoteDshHostRpcError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+    readonly details: unknown,
+  ) {
+    super(message)
+    this.name = 'RemoteDshHostRpcError'
+  }
+}
+
 function assertSegment(value: string, label: string): void {
   if (!/^[A-Za-z0-9_$.-]+$/.test(value)) throw new Error(`dsh-host extension ${label} is invalid`)
+}
+
+function safeDownloadName(value: string): string {
+  const name = value.replaceAll('\\', '/').split('/').at(-1)?.replace(/[^A-Za-z0-9._-]/gu, '_') ?? ''
+  return name === '' || name === '.' || name === '..' ? 'dsh-session.zip' : name
+}
+
+async function reconnectDelay(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) signal.throwIfAborted()
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve() }, 100)
+    const onAbort = (): void => {
+      clearTimeout(timer)
+      reject(signal.reason instanceof Error ? signal.reason : new Error('This operation was aborted'))
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
 }
 
 export default RemoteDshHostClient

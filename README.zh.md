@@ -49,6 +49,14 @@ dsh-tui
 进入 TUI 后，`/workspace remote`（或 `/workspace connect`）会先显示 SSH 设备列表，
 再浏览并选择远端目录；`/workspace resume` 列出已有工作区。也可以直接打开：
 
+`/connect` 进入另一种模式，也可以直接输入常见的 SSH 连接形式，例如
+`/connect ssh user@host -p 2222`。Agent、Session、工具和 workspace 都由远端
+Harness 持有，本地 TUI 只是它的客户端；使用 `/disconnect` 回到本地 Channel。
+完整远端 Backend 生效期间不会再显示 `/connect`，也不会披露 `/workspace remote`
+这类本地 workspace provider；普通 `/workspace` 操作直接作用于远端 Host。
+后端 provider 在运行时自动发现，不需要通过 patch 调整 `dsh-tui` bundle 行的加载顺序。
+registry 依赖是可选的，所以同一个 bundle 装进只有 Web 的 profile 时也不会等待 TUI service。
+
 目录浏览器中，Enter 选择当前目录；在第一行按 Tab 可以编辑或粘贴远端绝对路径，
 再按 Enter 读取该目录。
 
@@ -98,6 +106,12 @@ Codex、Claude Code 及其他自动化 Agent 应直接遵循 [INSTALL.md](INSTAL
 通道接入；只有 bundle 变化时才替换实例，并发更新由远端安装锁串行化。所有客户端
 连接同一个 Host 协议。点击 **在 Web 中打开 Backend**
 只会额外建立服务本机页面的同源反向代理；关闭窗口或 SSH 隧道不会停止远端 Backend。
+该窗口会显式标记为完整远端 Backend，因此不会再挂载本机的 Remote SSH 设置、
+远端 workspace 选择器和“再次打开 Backend”等入口；普通本地 Web 页面不受影响。
+
+逻辑 Backend 连接独立于一次物理 SSH。SSH 意外断开后会以带抖动的指数退避重建
+动态 tunnel，Web gateway URL 保持不变，Host 事件流自动重新订阅。传输中断时无法
+安全判断远端是否已执行的 unary mutation 不会自动重放；后续调用会等待重连完成。
 
 首次安装 Backend 还需要 `curl`、`sha256sum`、支持 xz 的 `tar`，以及访问 Node.js
 和 npm registry 的网络；安装过程不会修改系统包管理器。

@@ -14,6 +14,7 @@ import { RemoteSshSettings } from './RemoteSshSettings.tsx'
 import { RemoteWorkspaceFlow } from './RemoteWorkspaceFlow.tsx'
 import type { RemoteWorkspaceFlowInjected } from './RemoteWorkspaceFlow.tsx'
 import { installRemoteOpenPath } from './open-path.ts'
+import { REMOTE_BACKEND_CONTEXT_PATH, type RemoteBackendContext } from '../backend-context.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -26,9 +27,10 @@ export const name = 'dsh-remote-ssh-client'
 export const inject = ['slots', 'workspaces', 'sessions', 'locale']
 
 /** Register the localized settings, workspace flow, and transparent file opener. */
-export function apply(ctx: ClientContext): void {
+export async function apply(ctx: ClientContext): Promise<void> {
   const namespace = 'settings.remote-ssh'
   ctx.effect(() => ctx.locale.register(namespace, { zh, en }), 'dsh-remote-ssh: client copy')
+  if (await isRemoteBackendWindow()) return
   const t = ctx.locale.bind(namespace) as RemoteWorkspaceFlowInjected['t']
   installRemoteOpenPath(ctx)
 
@@ -58,4 +60,22 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({
     name: 'settings.plugin.item', id: 'remote-ssh', order: 30, inject: () => ({ t }),
   }, RemoteSshPluginCard))
+}
+
+/** Detect the gateway before registering any local-only Remote SSH chrome. */
+export async function isRemoteBackendWindow(
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<boolean> {
+  try {
+    const response = await fetcher(REMOTE_BACKEND_CONTEXT_PATH, {
+      credentials: 'same-origin',
+      cache: 'no-store',
+      headers: { accept: 'application/json' },
+    })
+    if (!response.ok) return false
+    const value = await response.json() as Partial<RemoteBackendContext>
+    return value.attached === true && value.transport === 'ssh'
+  } catch {
+    return false
+  }
 }

@@ -116,6 +116,60 @@ export interface NewSshHost {
   identityFile?: string
 }
 
+/** One executable SSH connection with no remote command attached. */
+export interface SshConnectionInvocation {
+  executable: string
+  sshArgs: string[]
+  sshTarget: string
+}
+
+/**
+ * Parse a pasted OpenSSH command for immediate use by `/connect`. Connection
+ * options are preserved instead of being written to config. Options that own
+ * forwarding or execute a remote command are rejected because the Backend
+ * transport supplies both itself.
+ */
+export function parseSshConnectionInvocation(command: string): SshConnectionInvocation {
+  if (/\r|\n/.test(command)) throw new Error('SSH connection command must be one line')
+  const argv = tokenizeSshConfigLine(command)
+  const executable = argv.shift()
+  if (executable === undefined || !/^ssh(?:\.exe)?$/i.test(win32.basename(executable)) && basename(executable) !== 'ssh') {
+    throw new Error('SSH connection command must start with ssh')
+  }
+  const sshArgs: string[] = []
+  let sshTarget: string | undefined
+  const optionsWithValue = new Set(['-B', '-b', '-c', '-E', '-F', '-I', '-i', '-J', '-l', '-m', '-o', '-P', '-p', '-S'])
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index] as string
+    if (sshTarget !== undefined) throw new Error('SSH connection command must not include a remote command')
+    if (argument === '--') {
+      const target = argv[index + 1]
+      if (target === undefined || index + 2 !== argv.length) throw new Error('SSH connection command requires one destination')
+      sshTarget = target
+      break
+    }
+    if (!argument.startsWith('-') || argument === '-') {
+      sshTarget = argument
+      continue
+    }
+    if (/^-[46AaCqTtvXxYy]+$/u.test(argument)) {
+      sshArgs.push(argument)
+      continue
+    }
+    const option = argument.slice(0, 2)
+    if (!optionsWithValue.has(option)) throw new Error(`unsupported SSH argument '${argument}'`)
+    sshArgs.push(argument)
+    if (argument.length > 2) continue
+    const value = argv[index + 1]
+    if (value === undefined) throw new Error(`missing value for ${argument}`)
+    sshArgs.push(value)
+    index += 1
+  }
+  if (sshTarget === undefined) throw new Error('SSH connection command requires a destination')
+  if (sshTarget === '' || /\s|[*?!\[\]]/.test(sshTarget)) throw new Error('SSH destination must be one concrete host')
+  return { executable, sshArgs, sshTarget }
+}
+
 /** Parse a VS Code-style `ssh user@host -p 22` connection command. */
 export function parseSshConnectionCommand(command: string): NewSshHost {
   if (/\r|\n/.test(command)) throw new Error('SSH connection command must be one line')

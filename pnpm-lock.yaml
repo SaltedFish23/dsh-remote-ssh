@@ -111,6 +111,9 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 3.18.1
         version: 3.18.1
+      '@deepseek-harness-tui/dsh-tui':
+        specifier: link:../dsh-tui
+        version: link:../dsh-tui
       '@types/js-yaml':
         specifier: ^4.0.9
         version: 4.0.9

@@ -1,55 +1,18 @@
 import { posix } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import type {
+  TuiWorkspaceChoice,
+  TuiWorkspaceCommand,
+  TuiWorkspaceCommandResult,
+  TuiWorkspaceProvider,
+  TuiWorkspaceRuntime,
+  TuiWorkspaceTarget,
+} from '@deepseek-harness-tui/dsh-tui/workspaces'
 import type { RemoteDirectoryListing, RemoteSshManager, RemoteSshServer, RemoteWorkspaceRoute } from '../routing/manager.ts'
-import { defaultSshConfigFiles, discoveredSshServerId, discoverSshConfigHosts } from '../ssh/config.ts'
+import { discoveredSshServerId } from '../ssh/config.ts'
+import { listAvailableServers } from '../tui/servers.ts'
 
-interface TuiWorkspaceTarget {
-  uri: string
-  cwd: string
-  label: string
-  description?: string
-  kind: 'local' | 'provider'
-  badge: string
-}
-
-interface TuiWorkspaceChoice {
-  id: string
-  label: string
-  description?: string
-  badge?: string
-  choose(signal?: AbortSignal): Promise<TuiWorkspaceCommandResult> | TuiWorkspaceCommandResult
-  input?: {
-    initialValue?: string
-    placeholder?: string
-    submit(value: string, signal?: AbortSignal): Promise<TuiWorkspaceCommandResult> | TuiWorkspaceCommandResult
-  }
-}
-
-type TuiWorkspaceCommandResult =
-  | { kind: 'choices'; title: string; choices: readonly TuiWorkspaceChoice[] }
-  | { kind: 'target'; target: TuiWorkspaceTarget }
-
-interface TuiWorkspaceCommand {
-  name: string
-  aliases?: readonly string[]
-  description: string
-  run(input: string, context: { cwd: string }, signal?: AbortSignal): Promise<TuiWorkspaceCommandResult> | TuiWorkspaceCommandResult
-}
-
-interface TuiWorkspaceProvider {
-  schemes: readonly string[]
-  list(signal?: AbortSignal): Promise<readonly TuiWorkspaceTarget[]> | readonly TuiWorkspaceTarget[]
-  resolve(uri: string, signal?: AbortSignal): Promise<TuiWorkspaceTarget | undefined> | TuiWorkspaceTarget | undefined
-  resolvePath?(path: string, cwd: string, signal?: AbortSignal): Promise<TuiWorkspaceTarget | undefined> | TuiWorkspaceTarget | undefined
-  describe(cwd: string): TuiWorkspaceTarget | undefined
-  commandShell?(cwd: string): Promise<unknown | undefined> | unknown | undefined
-  rename?(cwd: string, title: string): Promise<TuiWorkspaceTarget | undefined> | TuiWorkspaceTarget | undefined
-  commands?: readonly TuiWorkspaceCommand[]
-}
-
-interface TuiWorkspaceRuntime {
-  register(provider: TuiWorkspaceProvider): () => void
-}
+export { listAvailableServers } from '../tui/servers.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -124,24 +87,6 @@ export function remoteWorkspaceCommand(manager: RemoteSshManager): TuiWorkspaceC
       }
     },
   }
-}
-
-/** Merge durable entries with concrete hosts discovered from OpenSSH config. */
-export async function listAvailableServers(manager: RemoteSshManager): Promise<RemoteSshServer[]> {
-  const snapshot = manager.snapshot()
-  const discovered = await discoverSshConfigHosts(
-    snapshot.sshConfigFile === undefined ? defaultSshConfigFiles() : [snapshot.sshConfigFile],
-  )
-  const servers = new Map<string, RemoteSshServer>()
-  for (const host of discovered.hosts) {
-    servers.set(host.sshTarget.toLowerCase(), {
-      id: host.id,
-      label: host.label,
-      sshTarget: host.sshTarget,
-    })
-  }
-  for (const server of snapshot.servers) servers.set(server.sshTarget.toLowerCase(), server)
-  return [...servers.values()].sort((left, right) => left.label.localeCompare(right.label))
 }
 
 async function remoteDirectoryChoices(

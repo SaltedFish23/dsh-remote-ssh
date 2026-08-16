@@ -51,6 +51,17 @@ Inside the TUI, `/workspace remote` (or `/workspace connect`) opens an SSH
 device picker and then a remote directory browser. Existing workspaces are
 listed by `/workspace resume`. A target can also be opened directly:
 
+`/connect` selects a remote Host instead; `/connect ssh user@host -p 2222`
+accepts the usual SSH connection form directly. The Agent, Session, tools,
+and workspace then all live in the remote Harness, while the local TUI acts
+as its client. Use `/disconnect` to return to the local Channel. While a full
+remote Backend is active, `/connect` and local-only workspace providers such
+as `/workspace remote` are omitted; ordinary `/workspace` operations address
+the remote Host itself.
+The backend provider is discovered at runtime, so plugin load order does not
+require patching the `dsh-tui` bundle row. Its registry dependency is optional,
+so installing the same bundle in a Web-only profile does not wait for TUI services.
+
 In the directory browser, Enter selects the current directory. Press Tab on
 the first row to edit or paste an absolute remote path, then Enter to load it.
 
@@ -105,6 +116,12 @@ serialized by a remote install lock. All clients use the same forwarded Host
 protocol. Selecting **Open Backend in Web** adds a
 local same-origin proxy for the browser assets; closing it or its SSH tunnel
 does not stop the Backend.
+
+The logical Backend connection survives physical SSH failures. It rebuilds
+the dynamic tunnel with jittered exponential backoff, keeps the Web gateway
+URL stable, and reopens Host event streams. A unary mutation interrupted at
+the transport boundary is not replayed automatically, because its remote
+completion cannot be determined safely; later calls wait for reconnection.
 
 The first Backend installation additionally needs `curl`, `sha256sum`, `tar`
 with xz support, and network access to the Node.js and npm registries. It does

@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { appendSshHost, discoverSshConfigHosts, parseSshConnectionCommand } from '../src/ssh/config.ts'
+import { appendSshHost, discoverSshConfigHosts, parseSshConnectionCommand, parseSshConnectionInvocation } from '../src/ssh/config.ts'
 
 const roots: string[] = []
 
@@ -63,5 +63,15 @@ describe('OpenSSH config discovery', () => {
   it('rejects commands that could inject config lines or unsupported options', () => {
     expect(() => parseSshConnectionCommand('ssh host\nProxyCommand evil')).toThrow(/one line/)
     expect(() => parseSshConnectionCommand('ssh -F other-config host')).toThrow(/unsupported/)
+  })
+
+  it('preserves standard connection options for an immediate Backend connection', () => {
+    expect(parseSshConnectionInvocation('ssh -F custom.conf -J jump.example -o BatchMode=yes user@host.example')).toEqual({
+      executable: 'ssh',
+      sshArgs: ['-F', 'custom.conf', '-J', 'jump.example', '-o', 'BatchMode=yes'],
+      sshTarget: 'user@host.example',
+    })
+    expect(() => parseSshConnectionInvocation('ssh -L 3000:localhost:3000 host.example')).toThrow(/unsupported/)
+    expect(() => parseSshConnectionInvocation('ssh host.example whoami')).toThrow(/remote command/)
   })
 })

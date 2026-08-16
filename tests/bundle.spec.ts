@@ -39,6 +39,10 @@ describe('bundle overlay', () => {
     expect(byId.get('spill-local')).toMatchObject({ name: '@deepseek-ai/dsh-spill-local', disabled: true })
     expect(byId.get('remote-ssh-manager')).toMatchObject({ name: 'dsh-remote-ssh/manager' })
     expect(byId.get('remote-ssh-client-host')).toMatchObject({ name: 'dsh-remote-ssh' })
+    expect(byId.get('remote-ssh-tui-backend')).toMatchObject({
+      name: 'dsh-remote-ssh/tui-backend',
+      inject: ['remoteSshManager'],
+    })
     expect(byId.get('remote-ssh-web')).toMatchObject({
       name: 'dsh-remote-ssh/web',
       inject: ['remoteSshManager'],
@@ -60,6 +64,9 @@ describe('bundle overlay', () => {
     expect(byId.get('remote-ssh-agent-policy')).toMatchObject({ name: 'dsh-remote-ssh/agent-policy' })
     expect(byId.get('remote-ssh-tui')).toMatchObject({
       name: 'dsh-remote-ssh/tui',
+      inject: ['remoteSshManager'],
+    })
+    expect(byId.get('remote-ssh-search')).toMatchObject({
       inject: ['remoteSshManager'],
     })
     const localWorld = byId.get('remote-ssh-local-world')

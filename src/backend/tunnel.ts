@@ -19,6 +19,7 @@ export const DSH_HOST_PROTOCOL_VERSION = 1
 
 export type DshHostProgressStage =
   | 'connecting'
+  | 'reconnecting'
   | 'waiting-host'
   | 'checking-host'
   | 'uploading-host'
@@ -59,6 +60,8 @@ export interface RemoteDshHostTunnelConfig {
   packageRoot?: string
   /** Receives structured stages without opening another SSH connection. */
   onProgress?: (progress: DshHostProgress) => void
+  /** Cancels an in-flight SSH bootstrap without affecting the detached Host. */
+  signal?: AbortSignal
 }
 
 /**
@@ -69,6 +72,8 @@ export class RemoteDshHostTunnel {
   readonly localPort: number
   readonly remotePort: number
   readonly origin: string
+  /** Resolves whenever the underlying SSH process exits. */
+  readonly closed: Promise<void>
 
   private disposed = false
 
@@ -83,6 +88,9 @@ export class RemoteDshHostTunnel {
     this.localPort = localPort
     this.remotePort = remotePort
     this.origin = `http://127.0.0.1:${String(localPort)}`
+    this.closed = ssh.exitCode === null
+      ? new Promise(resolve => { ssh.once('close', () => { resolve() }) })
+      : Promise.resolve()
   }
 
   get alive(): boolean {
@@ -119,6 +127,7 @@ export class RemoteDshHostTunnel {
   }
 
   static async open(config: RemoteDshHostTunnelConfig): Promise<RemoteDshHostTunnel> {
+    config.signal?.throwIfAborted()
     emitProgress(config.onProgress, 'connecting')
     const payload = loadDshHostPayload(config.packageRoot)
     const ports = await reservePorts(2)
@@ -135,6 +144,8 @@ export class RemoteDshHostTunnel {
       config.sshTarget,
       buildDshBackendCommand(config.remotePort),
     ], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+    const abort = (): void => { ssh.kill() }
+    config.signal?.addEventListener('abort', abort, { once: true })
 
     let tunnel: RemoteDshHostTunnel | undefined
     try {
@@ -149,6 +160,8 @@ export class RemoteDshHostTunnel {
       if (tunnel !== undefined) await tunnel.dispose()
       else ssh.kill()
       throw error
+    } finally {
+      config.signal?.removeEventListener('abort', abort)
     }
   }
 
@@ -265,7 +278,7 @@ function emitProgress(listener: ((progress: DshHostProgress) => void) | undefine
 }
 
 function isProgressStage(value: string): value is DshHostProgressStage {
-  return value === 'connecting' || value === 'waiting-host' || value === 'checking-host' || value === 'uploading-host'
+  return value === 'connecting' || value === 'reconnecting' || value === 'waiting-host' || value === 'checking-host' || value === 'uploading-host'
     || value === 'reusing-host' || value === 'installing-host' || value === 'checking-runtime'
     || value === 'installing-node' || value === 'installing-pnpm' || value === 'installing-harness'
     || value === 'verifying-runtime' || value === 'installing-bundle' || value === 'installed'

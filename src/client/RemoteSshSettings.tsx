@@ -9,6 +9,7 @@ import { button, card, dim, input, page, primary, row, singleLineInput } from '.
 import { requireTranslate } from './types.ts'
 import type { LocalizedProps, Translate } from './types.ts'
 import { WorkspaceDirectoryPicker } from './WorkspaceDirectoryPicker.tsx'
+import { backendProgressLocaleKey } from '../backend/progress.ts'
 
 /** Full Remote SSH settings page. */
 export function RemoteSshSettings({ t: optionalT }: LocalizedProps): ReactElement {
@@ -155,24 +156,7 @@ export function RemoteSshSettings({ t: optionalT }: LocalizedProps): ReactElemen
 }
 
 function backendProgressLabel(t: Translate, stage: string): string {
-  switch (stage) {
-    case 'waiting-host': return t('backendWaiting')
-    case 'connecting': return t('backendConnecting')
-    case 'checking-host':
-    case 'checking-runtime':
-    case 'installing-host': return t('backendChecking')
-    case 'uploading-host': return t('backendUploading')
-    case 'reusing-host': return t('backendReusing')
-    case 'installing-node': return t('backendInstallingNode')
-    case 'installing-pnpm': return t('backendInstallingPnpm')
-    case 'installing-harness': return t('backendInstallingHarness')
-    case 'verifying-runtime': return t('backendVerifyingRuntime')
-    case 'installing-bundle': return t('backendInstallingBundle')
-    case 'installed':
-    case 'starting-host': return t('backendStarting')
-    case 'ready': return t('backendReady')
-    default: return t('backendConnecting')
-  }
+  return t(backendProgressLocaleKey(stage))
 }
 
 function renderBackendProgress(target: Window, label: string): void {

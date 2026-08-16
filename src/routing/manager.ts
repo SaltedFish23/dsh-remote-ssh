@@ -17,7 +17,8 @@ import RemoteSshRuntime, { fileUriFromPosixPath, posixPathFromFileUri, Workspace
 import RemoteSshShellExecutor from '../transport/shell.ts'
 import { DEFAULT_DSH_BACKEND_PORT, RemoteDshWebProxy } from '../backend/web.ts'
 import { RemoteDshHostClient } from '../backend/client.ts'
-import { RemoteDshHostTunnel, type DshHostProgress } from '../backend/tunnel.ts'
+import { RemoteDshHostConnection } from '../backend/connection.ts'
+import type { DshHostProgress } from '../backend/tunnel.ts'
 
 /** One SSH destination visible in Settings and workspace selection. */
 export interface RemoteSshServer {
@@ -27,7 +28,7 @@ export interface RemoteSshServer {
   sshArgs?: string[]
   remoteCodeCommand?: string
   sshExecutable?: string
-  /** Stable remote loopback port used by the full dsh-host Backend. */
+  /** Optional fixed override; zero lets the singleton choose a free port. */
   backendPort?: number
 }
 
@@ -184,7 +185,7 @@ export class RemoteSshManager extends Service {
   private readonly contexts = new Map<string, Promise<RemoteWorkspaceContext>>()
   private readonly shellContexts = new Map<string, Promise<RemoteWorkspaceShellContext>>()
   private readonly hosts = new Map<string, Promise<RemoteHostContext>>()
-  private readonly backendTunnels = new Map<string, Promise<RemoteDshHostTunnel>>()
+  private readonly backendTunnels = new Map<string, Promise<RemoteDshHostConnection>>()
   private readonly webProxies = new Map<string, Promise<RemoteDshWebProxy>>()
   private readonly backendProgress = new Map<string, BackendConnectionProgress>()
   private readonly backendProgressListeners = new Map<string, Set<(progress: BackendConnectionProgress) => void>>()
@@ -495,12 +496,16 @@ export class RemoteSshManager extends Service {
   }
 
   /** Open the UI-neutral Host protocol over one persistent SSH forward. */
-  async connectBackend(server: RemoteSshServer): Promise<RemoteDshHostTunnel> {
+  async connectBackend(server: RemoteSshServer): Promise<RemoteDshHostConnection> {
     const key = backendRuntimeKey(server)
     let pending = this.backendTunnels.get(key)
     if (pending !== undefined) {
       const existing = await pending.catch(() => undefined)
       if (existing?.alive === true) {
+        if (!existing.connected) {
+          this.publishBackendProgress(server, { stage: 'reconnecting' })
+          await existing.ready()
+        }
         this.publishBackendProgress(server, { stage: 'ready' })
         return existing
       }
@@ -509,7 +514,7 @@ export class RemoteSshManager extends Service {
     }
     const transport = this.transportFor(server)
     this.publishBackendProgress(server, { stage: 'connecting' })
-    pending = RemoteDshHostTunnel.open({
+    pending = RemoteDshHostConnection.open({
       sshExecutable: transport.executable,
       sshArgs: transport.args,
       sshTarget: server.sshTarget,

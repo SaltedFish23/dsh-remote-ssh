@@ -34,6 +34,8 @@
     "./manager": { "types": "./lib/manager.d.ts", "default": "./lib/manager.js" },
     "./backend/web": { "types": "./lib/backend.d.ts", "default": "./lib/backend.js" },
     "./backend/client": { "types": "./lib/backend-client.d.ts", "default": "./lib/backend-client.js" },
+    "./backend/control": { "types": "./lib/backend-control.d.ts", "default": "./lib/backend-control.js" },
+    "./backend/connection": { "types": "./lib/backend-connection.d.ts", "default": "./lib/backend-connection.js" },
     "./backend/tunnel": { "types": "./lib/backend-tunnel.d.ts", "default": "./lib/backend-tunnel.js" },
     "./router-fs": { "types": "./lib/router-fs.d.ts", "default": "./lib/router-fs.js" },
     "./router-subprocess": { "types": "./lib/router-subprocess.d.ts", "default": "./lib/router-subprocess.js" },
@@ -41,6 +43,7 @@
     "./local-bridge": { "types": "./lib/local-bridge.d.ts", "default": "./lib/local-bridge.js" },
     "./shell-transparent": { "types": "./lib/shell-transparent.d.ts", "default": "./lib/shell-transparent.js" },
     "./agent-policy": { "types": "./lib/agent-policy.d.ts", "default": "./lib/agent-policy.js" },
+    "./tui-backend": { "types": "./lib/tui-backend.d.ts", "default": "./lib/tui-backend.js" },
     "./tui": { "types": "./lib/tui.d.ts", "default": "./lib/tui.js" },
     "./web": { "types": "./lib/web.d.ts", "default": "./lib/web.js" },
     "./client": "./lib/client.js",
@@ -63,6 +66,7 @@
     }
   },
   "peerDependencies": {
+    "@deepseek-harness-tui/dsh-tui": "^0.7.0",
     "dsh-host": "^0.1.0",
     "@deepseek-ai/cordis": "^4.0.1-rc.1",
     "@deepseek-ai/dsh-agent": "*",
@@ -94,10 +98,14 @@
     "@deepseek-ai/dsh-tools": "*",
     "@deepseek-ai/schemastery": "^3.18.1-rc.1"
   },
+  "peerDependenciesMeta": {
+    "@deepseek-harness-tui/dsh-tui": { "optional": true }
+  },
   "dependencies": {
     "@microsoft/agent-host-protocol": "0.7.0"
   },
   "devDependencies": {
+    "@deepseek-harness-tui/dsh-tui": "link:../dsh-tui",
     "dsh-host": "link:../host",
     "@deepseek-ai/cordis": "4.0.1",
     "@deepseek-ai/cordis-plugin-include": "1.0.6",
