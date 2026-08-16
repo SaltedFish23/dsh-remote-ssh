@@ -1,7 +1,7 @@
 import type { SaveTextSpill } from '@deepseek-ai/dsh-spill'
-import { WorkspacePathMapper } from '../src/index.ts'
-import type { RemoteSshManager, RemoteWorkspaceRoute } from '../src/manager.ts'
-import { remoteSpillDirectory, safeSuggestedName, saveRemoteSpill } from '../src/spill.ts'
+import { WorkspacePathMapper } from '../src/transport/runtime.ts'
+import type { RemoteSshManager, RemoteWorkspaceRoute } from '../src/routing/manager.ts'
+import { remoteSpillDirectory, safeSuggestedName, saveRemoteSpill } from '../src/routing/spill.ts'
 import { describe, expect, it, vi } from 'vitest'
 
 const route: RemoteWorkspaceRoute = {

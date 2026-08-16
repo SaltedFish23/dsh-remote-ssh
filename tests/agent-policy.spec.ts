@@ -3,8 +3,8 @@ import { createScope, scopeOf } from '@deepseek-ai/dsh-scope'
 import SystemPrompt, { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { defineTool, type ToolCallView, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it } from 'vitest'
-import applyAgentPolicy, { installRemoteWorkspacePrompt, presentRemoteShellCall, remoteShellPresentation } from '../src/agent-policy.ts'
-import type { RemoteWorkspaceRoute } from '../src/manager.ts'
+import applyAgentPolicy, { installRemoteWorkspacePrompt, presentRemoteShellCall, remoteShellPresentation } from '../src/routing/agent-policy.ts'
+import type { RemoteWorkspaceRoute } from '../src/routing/manager.ts'
 
 const route = {
   kind: 'remote',

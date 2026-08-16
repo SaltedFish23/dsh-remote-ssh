@@ -3,9 +3,9 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import type { RemoteOpenFileMode, RemoteSshManager, RemoteSshServer } from './manager.ts'
-import { openRemoteFile } from './open-file.ts'
-import { appendSshHost, defaultSshConfigFiles, discoverSshConfigHosts } from './ssh-config.ts'
+import type { RemoteOpenFileMode, RemoteSshManager, RemoteSshServer } from '../routing/manager.ts'
+import { openRemoteFile } from '../ssh/open-file.ts'
+import { appendSshHost, defaultSshConfigFiles, discoverSshConfigHosts } from '../ssh/config.ts'
 
 export const REMOTE_SSH_STATE_PATH = '/plugins/dsh-remote-ssh/state'
 export const REMOTE_SSH_SERVER_PATH = '/plugins/dsh-remote-ssh/server'
@@ -90,12 +90,27 @@ function registerWebRoutes(ctx: Context): void {
     route(ctx, REMOTE_SSH_BACKEND_CONNECT_PATH, 'POST', async (req, res) => {
       const body = await readJson(req)
       const server = await resolveAvailableServer(ctx.remoteSshManager, requiredString(body, 'id'))
-      const backend = await ctx.remoteSshManager.connectBackend(server, ctx.webServer.port)
-      json(res, 200, {
-        url: backend.url,
-        localPort: backend.localPort,
-        remotePort: backend.remotePort,
+      res.writeHead(200, {
+        'content-type': 'application/x-ndjson; charset=utf-8',
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
       })
+      res.flushHeaders()
+      const send = (value: unknown): void => {
+        if (!res.destroyed && !res.writableEnded) res.write(`${JSON.stringify(value)}\n`)
+      }
+      const unwatch = ctx.remoteSshManager.watchBackendProgress(server, progress => {
+        send({ type: 'progress', stage: progress.stage })
+      })
+      try {
+        const backend = await ctx.remoteSshManager.connectWebBackend(server, ctx.webServer.port)
+        send({ type: 'ready', url: backend.url, localPort: backend.localPort, remotePort: backend.remotePort })
+      } catch (error) {
+        send({ type: 'error', error: safeMessage(error) })
+      } finally {
+        unwatch()
+        if (!res.destroyed && !res.writableEnded) res.end()
+      }
     }),
     route(ctx, REMOTE_SSH_CONFIG_HOST_PATH, 'POST', async (req, res) => {
       const body = await readJson(req)
@@ -177,7 +192,8 @@ function route(
       try {
         await handler(req, res)
       } catch (error: unknown) {
-        json(res, 400, { error: safeMessage(error) })
+        if (!res.headersSent) json(res, 400, { error: safeMessage(error) })
+        else if (!res.writableEnded) res.end()
       }
     },
   })

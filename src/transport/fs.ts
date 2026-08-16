@@ -17,8 +17,8 @@ import type {
 import z from '@deepseek-ai/schemastery'
 import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
 import type { FsBytesWriteOutcome } from './binary-fs.ts'
-import type { RemoteSshRuntime } from './index.ts'
-import { fileUriFromPosixPath, posixPathFromFileUri, WorkspacePathMapper } from './index.ts'
+import type { RemoteSshRuntime } from './runtime.ts'
+import { fileUriFromPosixPath, posixPathFromFileUri, WorkspacePathMapper } from './runtime.ts'
 
 export interface Config {
   diffBasisMaxBytes?: number

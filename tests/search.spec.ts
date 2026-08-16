@@ -1,7 +1,7 @@
 import { resolve } from 'node:path'
-import { WorkspacePathMapper } from '../src/index.ts'
-import type { RemoteWorkspaceRoute } from '../src/manager.ts'
-import { injectSearchPathHook, remoteAbsolutePath } from '../src/search.ts'
+import { WorkspacePathMapper } from '../src/transport/runtime.ts'
+import type { RemoteWorkspaceRoute } from '../src/routing/manager.ts'
+import { injectSearchPathHook, remoteAbsolutePath } from '../src/transport/search.ts'
 import { describe, expect, it } from 'vitest'
 
 const route: RemoteWorkspaceRoute = {

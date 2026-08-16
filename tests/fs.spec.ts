@@ -4,9 +4,9 @@ import type { AhpClient } from '@microsoft/agent-host-protocol/client'
 import { RpcError } from '@microsoft/agent-host-protocol/client'
 import { Context } from '@deepseek-ai/cordis'
 import { FsVersion } from '@deepseek-ai/dsh-fs'
-import type { RemoteSshRuntime } from '../src/index.ts'
-import { WorkspacePathMapper } from '../src/index.ts'
-import RemoteSshFileSystem from '../src/fs.ts'
+import type { RemoteSshRuntime } from '../src/transport/runtime.ts'
+import { WorkspacePathMapper } from '../src/transport/runtime.ts'
+import RemoteSshFileSystem from '../src/transport/fs.ts'
 import { describe, expect, it } from 'vitest'
 
 interface NodeEntry { type: 'file' | 'directory'; data: string | Uint8Array; etag: string }

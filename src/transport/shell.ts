@@ -14,8 +14,8 @@ import type {
   ShellRunResult,
 } from '@deepseek-ai/dsh-shell'
 import z from '@deepseek-ai/schemastery'
-import type { RemoteSshRuntime } from './index.ts'
-import { fileUriFromPosixPath, quotePosix, WorkspacePathMapper } from './index.ts'
+import type { RemoteSshRuntime } from './runtime.ts'
+import { fileUriFromPosixPath, quotePosix, WorkspacePathMapper } from './runtime.ts'
 
 export interface Config {
   defaultTimeoutMs?: number

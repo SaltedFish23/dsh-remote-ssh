@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { parseSshWorkspaceUri, remoteWorkspaceCommand, resolveSshWorkspacePath, sshWorkspaceUri } from '../src/tui.ts'
-import type { RemoteWorkspaceRoute } from '../src/manager.ts'
+import { parseSshWorkspaceUri, remoteWorkspaceCommand, resolveSshWorkspacePath, sshWorkspaceUri } from '../src/profiles/tui.ts'
+import type { RemoteWorkspaceRoute } from '../src/routing/manager.ts'
 
 describe('TUI workspace URIs', () => {
   it('parses configured-server and direct SSH targets', () => {

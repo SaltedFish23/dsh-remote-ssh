@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { SettingsProvider } from '@deepseek-ai/dsh-settings'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
-import RemoteSshManager from '../src/manager.ts'
+import RemoteSshManager from '../src/routing/manager.ts'
 import { describe, expect, it } from 'vitest'
 
 class MemorySettings extends SettingsProvider {

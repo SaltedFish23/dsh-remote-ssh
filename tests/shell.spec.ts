@@ -2,9 +2,9 @@ import { resolve } from 'node:path'
 import { ActionType } from '@microsoft/agent-host-protocol'
 import type { AhpClient, Subscription, SubscriptionEvent } from '@microsoft/agent-host-protocol/client'
 import { Context } from '@deepseek-ai/cordis'
-import type { RemoteSshRuntime } from '../src/index.ts'
-import { WorkspacePathMapper } from '../src/index.ts'
-import RemoteSshShellExecutor from '../src/shell.ts'
+import type { RemoteSshRuntime } from '../src/transport/runtime.ts'
+import { WorkspacePathMapper } from '../src/transport/runtime.ts'
+import RemoteSshShellExecutor from '../src/transport/shell.ts'
 import { describe, expect, it } from 'vitest'
 
 class FakeSubscription implements AsyncIterableIterator<SubscriptionEvent> {

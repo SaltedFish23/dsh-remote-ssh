@@ -4,13 +4,13 @@ import { ActionType } from '@microsoft/agent-host-protocol'
 import type { AhpClient, Subscription, SubscriptionEvent } from '@microsoft/agent-host-protocol/client'
 import { Context } from '@deepseek-ai/cordis'
 import type { SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
-import { WorkspacePathMapper, fileUriFromPosixPath } from '../src/index.ts'
+import { WorkspacePathMapper, fileUriFromPosixPath } from '../src/transport/runtime.ts'
 import TransparentSubprocessRuntime, {
   DeferredAhpStdin,
   buildRemoteProcessCommand,
   buildRemoteStdinWriterCommand,
   canUseAhpSubprocess,
-} from '../src/router-subprocess.ts'
+} from '../src/routing/subprocess.ts'
 import { describe, expect, it } from 'vitest'
 
 class FakeResourceClient {

@@ -6,7 +6,7 @@ import {
   DSH_AHP_PROTOCOL_VERSIONS,
   formatAhpProtocolMismatch,
   VALIDATED_FORWARD_PROTOCOL_VERSIONS,
-} from '../src/ahp-compat.ts'
+} from '../src/transport/ahp-compat.ts'
 
 describe('AHP compatibility policy', () => {
   it('combines SDK-declared and explicitly validated forward protocols without duplicates', () => {

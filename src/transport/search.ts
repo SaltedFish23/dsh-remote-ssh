@@ -3,7 +3,7 @@ import { posix } from 'node:path'
 import type { LoadFnOutput, ModuleSource } from 'node:module'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
-import type { RemoteSshManager } from './manager.ts'
+import type { RemoteSshManager } from '../routing/manager.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {

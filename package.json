@@ -32,7 +32,9 @@
     "./shell": { "types": "./lib/shell.d.ts", "default": "./lib/shell.js" },
     "./search": { "types": "./lib/search.d.ts", "default": "./lib/search.js" },
     "./manager": { "types": "./lib/manager.d.ts", "default": "./lib/manager.js" },
-    "./backend": { "types": "./lib/backend.d.ts", "default": "./lib/backend.js" },
+    "./backend/web": { "types": "./lib/backend.d.ts", "default": "./lib/backend.js" },
+    "./backend/client": { "types": "./lib/backend-client.d.ts", "default": "./lib/backend-client.js" },
+    "./backend/tunnel": { "types": "./lib/backend-tunnel.d.ts", "default": "./lib/backend-tunnel.js" },
     "./router-fs": { "types": "./lib/router-fs.d.ts", "default": "./lib/router-fs.js" },
     "./router-subprocess": { "types": "./lib/router-subprocess.d.ts", "default": "./lib/router-subprocess.js" },
     "./spill": { "types": "./lib/spill.d.ts", "default": "./lib/spill.js" },
@@ -61,6 +63,7 @@
     }
   },
   "peerDependencies": {
+    "dsh-host": "^0.1.0",
     "@deepseek-ai/cordis": "^4.0.1-rc.1",
     "@deepseek-ai/dsh-agent": "*",
     "@deepseek-ai/dsh-fs": "*",
@@ -77,6 +80,7 @@
     "@deepseek-ai/dsh-tool-pwsh": "*",
     "@deepseek-ai/dsh-workspace": "*",
     "@deepseek-ai/dsh-host-webserver": "*",
+    "@deepseek-ai/dsh-host-apiproxy": "*",
     "@deepseek-ai/dsh-host-directory-picker-browse": "*",
     "@deepseek-ai/dsh-client-runtime": "*",
     "@deepseek-ai/dsh-client-locale": "*",
@@ -94,6 +98,7 @@
     "@microsoft/agent-host-protocol": "0.7.0"
   },
   "devDependencies": {
+    "dsh-host": "link:../host",
     "@deepseek-ai/cordis": "4.0.1",
     "@deepseek-ai/cordis-plugin-include": "1.0.6",
     "@deepseek-ai/cordis-plugin-loader": "1.0.2",
@@ -112,6 +117,7 @@
     "@deepseek-ai/dsh-tool-pwsh": "0.1.0-rc.6",
     "@deepseek-ai/dsh-workspace": "0.1.0-rc.6",
     "@deepseek-ai/dsh-host-webserver": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-host-apiproxy": "0.1.0-rc.6",
     "@deepseek-ai/dsh-host-directory-picker-browse": "0.1.0-rc.6",
     "@deepseek-ai/dsh-client-runtime": "0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-settings": "0.1.0-rc.6",

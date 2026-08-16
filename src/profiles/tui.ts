@@ -1,7 +1,7 @@
 import { posix } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import type { RemoteDirectoryListing, RemoteSshManager, RemoteSshServer, RemoteWorkspaceRoute } from './manager.ts'
-import { defaultSshConfigFiles, discoveredSshServerId, discoverSshConfigHosts } from './ssh-config.ts'
+import type { RemoteDirectoryListing, RemoteSshManager, RemoteSshServer, RemoteWorkspaceRoute } from '../routing/manager.ts'
+import { defaultSshConfigFiles, discoveredSshServerId, discoverSshConfigHosts } from '../ssh/config.ts'
 
 interface TuiWorkspaceTarget {
   uri: string

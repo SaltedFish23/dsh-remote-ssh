@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { appendSshHost, discoverSshConfigHosts, parseSshConnectionCommand } from '../src/ssh-config.ts'
+import { appendSshHost, discoverSshConfigHosts, parseSshConnectionCommand } from '../src/ssh/config.ts'
 
 const roots: string[] = []
 

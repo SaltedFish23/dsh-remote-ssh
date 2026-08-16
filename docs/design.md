@@ -119,6 +119,12 @@ Remote `bash` 保留 Harness 官方工具接口。每个前台调用通过 host 
 
 OpenSSH 仅用于 host runtime 的 bootstrap 与 tunnel。POSIX 本机可用短 ControlPath、`ControlMaster=auto` 与 `ControlPersist=60` 合并启动阶段的 SSH 会话；Windows 自带 OpenSSH 和 Git OpenSSH 在实测中会 reset multiplex session，因此 Windows 禁用 ControlMaster。两种平台进入 AHP ready 状态后，普通 fs、shell、搜索、subprocess 和 PTY 都走 host 长连接，不存在逐命令握手。
 
+## 完整 Backend 单例
+
+完整 Backend 使用远端固定实例键 `dsh-remote-ssh`，而不是为每次连接启动进程。`dsh-host` 将当前 generation、PID、随机 loopback 端口和 token 文件发布到远端 per-user 注册表。连接过程先在同一 SSH 上完成 payload hash 协商，再用 OpenSSH `-D` 建立动态 SOCKS；客户端从注册表取得实际端口后，才在本机建立 TCP 入口。SSH 断开只销毁入口，不停止 Host。
+
+payload hash 相同则复用现有 generation；hash 变化才 `--replace`。安装锁把并发 attach/升级串行化，因此正常状态下每个远端 OS 用户只有一个 Remote SSH Host，固定远端端口也不再是身份或生命周期依据。
+
 ## Agent Host 版本策略
 
 `@microsoft/agent-host-protocol` 的正式支持版本和经真实集成验证的 forward protocol 只在 `src/ahp-compat.ts` 合并。运行时不根据“最新版”猜测兼容性，而以 `initialize` 握手为准。默认 bootstrap 顺序为 PATH `code` / 私有 CLI、随后是远端缓存的所有 VS Code Server `code-server`（按新到旧）；协议不匹配会清理本次 tunnel/host 并继续下一个候选。
@@ -141,7 +147,7 @@ OpenSSH 仅用于 host runtime 的 bootstrap 与 tunnel。POSIX 本机可用短 
 
 ## 非目标与后续
 
-- 不实现第二套远端工具或自定义 daemon；
+- 不实现第二套远端工具；完整 Backend 通过通用 `dsh-host` 协议承载 Harness；
 - 不实现经典 Remote Agent 私有 wire protocol；
 - 不声称本地 sandbox 能约束远端内核；
 - 当前不支持 Windows SSH 远端；

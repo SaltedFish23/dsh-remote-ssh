@@ -5,7 +5,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SpillLocator, SpillStore } from '@deepseek-ai/dsh-spill'
 import type { SaveTextSpill, SpillRef } from '@deepseek-ai/dsh-spill'
 import type { RemoteSshManager, RemoteWorkspaceRoute } from './manager.ts'
-import { fileUriFromPosixPath, quotePosix } from './index.ts'
+import { fileUriFromPosixPath, quotePosix } from '../transport/runtime.ts'
 
 export const name = 'dsh-remote-ssh-spill'
 export const inject = ['localSpillStore', 'remoteSshManager']

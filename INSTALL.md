@@ -183,16 +183,19 @@ Do not create or modify files outside the user-approved test workspace.
 This is separate from the AHP workspace flow. Use it only when the user wants
 the AI runtime and all Harness state to live on the SSH host.
 
-1. Install `dsh-host` on that server by following its own `INSTALL.md`.
-2. In **Settings → Remote SSH**, select **Open Backend** beside the host.
-3. Require the observer window to load remote sessions and keep receiving
+1. Build or install the matching `dsh-host` bundle beside this connector.
+2. In **Settings → Remote SSH**, select **Open Backend in Web** beside the host.
+   The connector must upload and install or upgrade the Host through that same
+   SSH process; do not preinstall it manually for this verification.
+3. Require the Web client to load remote sessions and keep receiving
    WebSocket events.
-4. Close the observer and reconnect. Require the same Backend identity and
+4. Close the Web client and reconnect. Require the same Backend identity and
    existing sessions to remain.
 
-The connector uses one SSH process for Host startup/reuse and all HTTP/WebSocket
-forwarding. Do not replace it with separate probe, token-read, and tunnel SSH
-commands; rate-limited servers depend on the single-connection contract.
+The connector uses one SSH process for package negotiation, Host startup/reuse,
+and all HTTP/WebSocket forwarding. Do not replace it with separate probe,
+upload, token-read, and tunnel SSH commands; rate-limited servers depend on the
+single-connection contract.
 
 ### 9. Report completion
 

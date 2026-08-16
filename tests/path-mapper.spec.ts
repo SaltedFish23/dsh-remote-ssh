@@ -8,7 +8,7 @@ import {
   fileUriFromPosixPath,
   posixPathFromFileUri,
   quotePosix,
-} from '../src/index.ts'
+} from '../src/transport/runtime.ts'
 
 describe('WorkspacePathMapper', () => {
   it('maps the local alias and relative paths into one remote workspace', () => {

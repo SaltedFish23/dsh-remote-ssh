@@ -1,7 +1,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it } from 'vitest'
-import * as TuiAdapter from '../src/tui.ts'
-import * as WebAdapter from '../src/web.ts'
+import * as TuiAdapter from '../src/profiles/tui.ts'
+import * as WebAdapter from '../src/profiles/web.ts'
 
 describe('optional front-door adapters', () => {
   it('activates both adapter entries without either front-door service', async () => {

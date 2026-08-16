@@ -14,8 +14,8 @@ import type {
 } from '@deepseek-ai/dsh-fs'
 import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
 import type { RemoteSshManager, RemoteWorkspaceRoute } from './manager.ts'
-import { binaryWriter } from './binary-fs.ts'
-import type { FsBytesWriteOutcome } from './binary-fs.ts'
+import { binaryWriter } from '../transport/binary-fs.ts'
+import type { FsBytesWriteOutcome } from '../transport/binary-fs.ts'
 
 interface RemoteTargetEnvelope {
   workspaceId: string

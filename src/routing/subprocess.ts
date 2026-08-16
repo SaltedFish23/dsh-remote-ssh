@@ -21,7 +21,7 @@ import type {
   SubprocessTerminalSpawnSpec,
 } from '@deepseek-ai/dsh-subprocess'
 import type { RemoteSshManager, RemoteWorkspaceRoute } from './manager.ts'
-import { fileUriFromPosixPath, quotePosix } from './index.ts'
+import { fileUriFromPosixPath, quotePosix } from '../transport/runtime.ts'
 
 /** Subprocess router that selects the host from `spec.cwd`, never tool identity. */
 export class TransparentSubprocessRuntime extends SubprocessRuntime {

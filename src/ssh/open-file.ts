@@ -5,7 +5,7 @@ import { access, mkdir, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, delimiter, dirname, isAbsolute, resolve } from 'node:path'
 import { posix } from 'node:path'
-import type { RemoteOpenFileMode, RemoteSshManager } from './manager.ts'
+import type { RemoteOpenFileMode, RemoteSshManager } from '../routing/manager.ts'
 
 type KnownEditorId = Exclude<RemoteOpenFileMode, 'auto' | 'custom' | 'download'>
 
