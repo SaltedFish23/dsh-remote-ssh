@@ -1,4 +1,4 @@
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import { OPEN_FILE_PATH, request, STATE_PATH } from './api.ts'
 import type { CatalogState } from './api.ts'
 import { resolveRemoteOpenWorkspace } from './open-route.ts'
@@ -10,7 +10,7 @@ interface RemoteOpenResponse {
 
 /** Transparently route chat/tool file links through the owning remote Workspace. */
 export function installRemoteOpenPath(ctx: ClientContext): void {
-  const workspaces = ctx.workspaces
+  const workspaces = ctx.uiWorkspace
   const previous = workspaces.openPath
   const routed = async (path: string): Promise<void> => {
     const state = await request<CatalogState>(STATE_PATH)

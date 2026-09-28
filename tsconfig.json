@@ -8,12 +8,29 @@
     "module": "esnext",
     "moduleResolution": "bundler",
     "target": "ESNext",
-    "lib": ["ESNext", "DOM"],
+    "lib": [
+      "ESNext",
+      "DOM"
+    ],
     "allowImportingTsExtensions": true,
     "esModuleInterop": true,
     "noEmit": true,
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
-  "include": ["src", "tests", "tsdown.config.ts"],
-  "exclude": ["src/client"]
+  "include": [
+    "src",
+    "tests",
+    "tsdown.config.ts"
+  ],
+  "exclude": [
+    "src/client",
+    "src/tui",
+    "src/backend",
+    "src/profiles/tui.ts",
+    "src/profiles/tui-backend.ts",
+    "tests",
+    "scripts"
+  ]
 }

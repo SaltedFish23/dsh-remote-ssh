@@ -1,32 +1,49 @@
 import { mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { Context } from '@deepseek-ai/cordis'
-import { SettingsProvider } from '@deepseek-ai/dsh-settings'
-import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
+import { Context, Fiber, Service } from '@deepseek-ai/cordis'
 import RemoteSshManager from '../src/routing/manager.ts'
 import { describe, expect, it } from 'vitest'
 
-class MemorySettings extends SettingsProvider {
-  private storedDocument: Record<string, unknown> = {}
+/** Minimal SettingsForms stand-in: records replace() writes per profile entry. */
+class MemorySettingsForms extends Service {
+  private readonly sections = new Map<string, object>()
+
+  constructor(ctx: Context) {
+    super(ctx, 'settings')
+  }
 
   get writable(): boolean { return true }
 
-  protected load(): Promise<Record<string, unknown>> {
-    return Promise.resolve(structuredClone(this.storedDocument))
+  describe(): unknown[] { return [] }
+
+  update(ns: string, patch: object): Promise<void> {
+    this.sections.set(ns, { ...(this.sections.get(ns) ?? {}), ...patch })
+    return Promise.resolve()
   }
 
-  protected persist(namespace: SettingsNamespace, section: Record<string, unknown>): Promise<void> {
-    this.storedDocument = { ...this.storedDocument, [namespace]: structuredClone(section) }
+  replace(ns: string, section: object): Promise<void> {
+    this.sections.set(ns, structuredClone(section))
     return Promise.resolve()
+  }
+
+  stored(ns: string): object | undefined {
+    return this.sections.get(ns)
   }
 }
 
 async function createContext(): Promise<Context> {
   const ctx = new Context()
-  await ctx.plugin(MemorySettings).await()
+  await ctx.plugin(MemorySettingsForms).await()
   return ctx
 }
+
+// The Loader normally supplies fiber.entry; expose a profile entry id for
+// every fiber so SettingsForms write paths are exercised end to end.
+Object.defineProperty(Fiber.prototype, 'entry', {
+  get: () => ({ options: { id: 'remote-ssh-manager' } }),
+  configurable: true,
+})
 
 describe('RemoteSshManager', () => {
   it('persists remote open preferences atomically with safe defaults', async () => {
@@ -55,6 +72,27 @@ describe('RemoteSshManager', () => {
       expect(manager.snapshot().openFileEditorPath).toBeUndefined()
     } finally {
       await ctx.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses preference writes without a Loader profile entry', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-remote-ssh-manager-'))
+    delete (Fiber.prototype as { entry?: unknown }).entry
+    try {
+      const ctx = await createContext()
+      try {
+        await ctx.plugin(RemoteSshManager, { aliasRoot: root })
+        await expect(ctx.remoteSshManager.updateUserPreferences({ openFileMode: 'download' }))
+          .rejects.toThrow(/settings write requires a profile entry/)
+      } finally {
+        await ctx.fiber.dispose()
+      }
+    } finally {
+      Object.defineProperty(Fiber.prototype, 'entry', {
+        get: () => ({ options: { id: 'remote-ssh-manager' } }),
+        configurable: true,
+      })
       await rm(root, { recursive: true, force: true })
     }
   })

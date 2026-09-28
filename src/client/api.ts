@@ -7,7 +7,6 @@ export const CONFIG_HOST_PATH = '/plugins/dsh-remote-ssh/ssh-config/host'
 export const SETTINGS_PATH = '/plugins/dsh-remote-ssh/settings'
 export const DIRECTORY_PATH = '/plugins/dsh-remote-ssh/directory'
 export const OPEN_FILE_PATH = '/plugins/dsh-remote-ssh/open-file'
-export const BACKEND_CONNECT_PATH = '/plugins/dsh-remote-ssh/backend/connect'
 
 export type BackendConnectEvent =
   | { type: 'progress'; stage: string }

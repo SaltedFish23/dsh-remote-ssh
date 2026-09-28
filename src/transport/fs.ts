@@ -190,6 +190,15 @@ export class RemoteSshFileSystem extends FileSystem {
     }
   }
 
+  override async readByteRange(target: FsTarget, range: { offset: number; length: number }, signal?: AbortSignal): Promise<Uint8Array> {
+    if (!Number.isSafeInteger(range.offset) || range.offset < 0) throw new FsError('offset must be a non-negative integer', 'FS_TOO_LARGE')
+    if (!Number.isSafeInteger(range.length) || range.length < 0) throw new FsError('length must be a non-negative integer', 'FS_TOO_LARGE')
+    // The AHP resource protocol has no ranged read; fetch the bounded prefix
+    // and slice the requested window out of it.
+    const bytes = await this.readBytes(target, signal, range.offset + range.length)
+    return bytes.slice(range.offset, range.offset + range.length)
+  }
+
   override async listDir(target: FsTarget, signal?: AbortSignal): Promise<FsDirEntry[]> {
     throwIfAborted(signal, 'list')
     try {

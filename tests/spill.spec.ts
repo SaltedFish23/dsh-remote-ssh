@@ -30,7 +30,7 @@ describe('transparent spill store', () => {
       stdout: { text: '', truncated: false },
       stderr: { text: '', truncated: false },
     }))
-    const shell = { resolve: vi.fn((spec: unknown) => spec), run }
+    const shell = { resolve: vi.fn((spec: unknown) => spec), execute: async (spec: unknown) => ({ result: async () => run(spec) }) }
     const manager = {
       workspaceContext: vi.fn(async () => ({
         remote: { runtimeRoot: '/runtime/client', getClient: async () => ({ resourceWrite }) },

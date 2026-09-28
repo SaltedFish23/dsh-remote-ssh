@@ -7,18 +7,14 @@ import { posix } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import type { ShellExecutor } from '@deepseek-ai/dsh-shell'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
-import type { SettingsScope } from '@deepseek-ai/dsh-settings'
+import type {} from '@deepseek-ai/dsh-settings'
+import type { SettingsForms } from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-workspace'
 import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
 import z from '@deepseek-ai/schemastery'
 import RemoteSshFileSystem from '../transport/fs.ts'
 import RemoteSshRuntime, { fileUriFromPosixPath, posixPathFromFileUri, WorkspacePathMapper } from '../transport/runtime.ts'
 import RemoteSshShellExecutor from '../transport/shell.ts'
-import { DEFAULT_DSH_BACKEND_PORT, RemoteDshWebProxy } from '../backend/web.ts'
-import { RemoteDshHostClient } from '../backend/client.ts'
-import { RemoteDshHostConnection } from '../backend/connection.ts'
-import type { DshHostProgress } from '../backend/tunnel.ts'
 
 /** One SSH destination visible in Settings and workspace selection. */
 export interface RemoteSshServer {
@@ -30,10 +26,6 @@ export interface RemoteSshServer {
   sshExecutable?: string
   /** Optional fixed override; zero lets the singleton choose a free port. */
   backendPort?: number
-}
-
-export interface BackendConnectionProgress extends DshHostProgress {
-  error?: string
 }
 
 /** Durable projection from one local alias directory to one remote directory. */
@@ -129,7 +121,6 @@ export interface RemoteDirectoryListing {
   entries: RemoteDirectoryEntry[]
 }
 
-const SETTINGS_NAMESPACE = settingsNamespace('remote-ssh')
 const ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/
 
 const serverSchema: z<RemoteSshServer> = z.object({
@@ -178,17 +169,14 @@ export class RemoteSshManager extends Service {
 
   private readonly entry: ResolvedConfig
   private current: ResolvedConfig
-  private settings: SettingsScope<Config> | undefined
+  /** Profile entry id used by SettingsForms; absent when mounted without Loader. */
+  private readonly entryId: string | undefined
   private readonly routes = new Map<string, RemoteWorkspaceRoute>()
   private readonly routeByWorkspaceId = new Map<string, RemoteWorkspaceRoute>()
   private readonly remoteAliases = new Set<string>()
   private readonly contexts = new Map<string, Promise<RemoteWorkspaceContext>>()
   private readonly shellContexts = new Map<string, Promise<RemoteWorkspaceShellContext>>()
   private readonly hosts = new Map<string, Promise<RemoteHostContext>>()
-  private readonly backendTunnels = new Map<string, Promise<RemoteDshHostConnection>>()
-  private readonly webProxies = new Map<string, Promise<RemoteDshWebProxy>>()
-  private readonly backendProgress = new Map<string, BackendConnectionProgress>()
-  private readonly backendProgressListeners = new Map<string, Set<(progress: BackendConnectionProgress) => void>>()
   private readonly sessionWorlds = new Map<string, {
     owner: object
     workspaceId: string | null
@@ -202,6 +190,7 @@ export class RemoteSshManager extends Service {
     super(ctx, 'remoteSshManager')
     this.entry = config as ResolvedConfig
     this.current = this.entry
+    this.entryId = ctx.fiber.entry?.options.id
     this.validate(this.entry)
     this.initialRefresh = this.queueRefresh(this.entry)
 
@@ -212,19 +201,6 @@ export class RemoteSshManager extends Service {
         if (this.workspaceRegistry === workspaceCtx.workspaceRegistry) this.workspaceRegistry = undefined
       }, 'Remote SSH workspace registry attachment')
     })
-
-    const scope = ctx.settings.register(SETTINGS_NAMESPACE, RemoteSshManager.Config, {
-      base: this.entry,
-      applies: 'live',
-      validate: value => { this.validate(value as ResolvedConfig) },
-    })
-    this.settings = scope
-    void this.queueRefresh(scope.get() as ResolvedConfig)
-    const unwatch = scope.watch(next => this.queueRefresh(next as ResolvedConfig))
-    ctx.effect(() => () => {
-      unwatch()
-      if (this.settings === scope) this.settings = undefined
-    }, 'Remote SSH settings watch')
 
     ctx.effect(() => async () => {
       await this.refreshTail
@@ -237,13 +213,6 @@ export class RemoteSshManager extends Service {
       const hosts = await Promise.allSettled(this.hosts.values())
       await Promise.allSettled(hosts.flatMap(result => result.status === 'fulfilled' ? [this.disposeHost(result.value)] : []))
       this.hosts.clear()
-      const proxies = await Promise.allSettled(this.webProxies.values())
-      await Promise.allSettled(proxies.flatMap(result => result.status === 'fulfilled' ? [result.value.dispose()] : []))
-      this.webProxies.clear()
-      const tunnels = await Promise.allSettled(this.backendTunnels.values())
-      await Promise.allSettled(tunnels.flatMap(result => result.status === 'fulfilled' ? [result.value.dispose()] : []))
-      this.backendTunnels.clear()
-      this.backendProgressListeners.clear()
     }, 'Remote SSH workspace context teardown')
   }
 
@@ -495,98 +464,6 @@ export class RemoteSshManager extends Service {
     return this.transportFor(route.server)
   }
 
-  /** Open the UI-neutral Host protocol over one persistent SSH forward. */
-  async connectBackend(server: RemoteSshServer): Promise<RemoteDshHostConnection> {
-    const key = backendRuntimeKey(server)
-    let pending = this.backendTunnels.get(key)
-    if (pending !== undefined) {
-      const existing = await pending.catch(() => undefined)
-      if (existing?.alive === true) {
-        if (!existing.connected) {
-          this.publishBackendProgress(server, { stage: 'reconnecting' })
-          await existing.ready()
-        }
-        this.publishBackendProgress(server, { stage: 'ready' })
-        return existing
-      }
-      if (existing !== undefined) await existing.dispose()
-      this.backendTunnels.delete(key)
-    }
-    const transport = this.transportFor(server)
-    this.publishBackendProgress(server, { stage: 'connecting' })
-    pending = RemoteDshHostConnection.open({
-      sshExecutable: transport.executable,
-      sshArgs: transport.args,
-      sshTarget: server.sshTarget,
-      remotePort: server.backendPort ?? DEFAULT_DSH_BACKEND_PORT,
-      startupTimeoutMs: this.current.startupTimeoutMs,
-      onProgress: progress => { this.publishBackendProgress(server, progress) },
-    })
-    pending = pending.then(tunnel => {
-      this.publishBackendProgress(server, { stage: 'ready' })
-      return tunnel
-    }, error => {
-      this.publishBackendProgress(server, {
-        stage: 'failed',
-        error: (error instanceof Error ? error.message : String(error)).slice(0, 1000),
-      })
-      throw error
-    })
-    this.backendTunnels.set(key, pending)
-    void pending.catch(() => { if (this.backendTunnels.get(key) === pending) this.backendTunnels.delete(key) })
-    return pending
-  }
-
-  /** Observe one Host installation/attachment without requiring the Host to exist yet. */
-  watchBackendProgress(
-    server: RemoteSshServer,
-    listener: (progress: BackendConnectionProgress) => void,
-  ): () => void {
-    const key = backendRuntimeKey(server)
-    let listeners = this.backendProgressListeners.get(key)
-    if (listeners === undefined) {
-      listeners = new Set()
-      this.backendProgressListeners.set(key, listeners)
-    }
-    listeners.add(listener)
-    const current = this.backendProgress.get(key)
-    if (current !== undefined) listener(current)
-    return () => {
-      listeners?.delete(listener)
-      if (listeners?.size === 0) this.backendProgressListeners.delete(key)
-    }
-  }
-
-  private publishBackendProgress(server: RemoteSshServer, progress: BackendConnectionProgress): void {
-    const key = backendRuntimeKey(server)
-    this.backendProgress.set(key, progress)
-    for (const listener of this.backendProgressListeners.get(key) ?? []) {
-      try { listener(progress) } catch {}
-    }
-  }
-
-  /** Open a typed, UI-neutral client on the shared Host tunnel. */
-  async connectBackendClient(server: RemoteSshServer): Promise<RemoteDshHostClient> {
-    return new RemoteDshHostClient(await this.connectBackend(server), this.current.requestTimeoutMs)
-  }
-
-  /** Serve the local Web assets while proxying the unchanged Host protocol. */
-  async connectWebBackend(server: RemoteSshServer, localUiPort: number): Promise<RemoteDshWebProxy> {
-    const key = webBackendRuntimeKey(server, localUiPort)
-    let pending = this.webProxies.get(key)
-    if (pending !== undefined) {
-      const existing = await pending.catch(() => undefined)
-      if (existing?.alive === true) return existing
-      if (existing !== undefined) await existing.dispose()
-      this.webProxies.delete(key)
-    }
-    const tunnel = await this.connectBackend(server)
-    pending = RemoteDshWebProxy.attach(tunnel, localUiPort)
-    this.webProxies.set(key, pending)
-    void pending.catch(() => { if (this.webProxies.get(key) === pending) this.webProxies.delete(key) })
-    return pending
-  }
-
   /** AHP-backed shell view sharing the host runtime but retaining workspace path mapping. */
   async workspaceShell(route: RemoteWorkspaceRoute, dialect: 'bash' | 'pwsh'): Promise<ShellExecutor> {
     const key = `${route.workspace.id}:${dialect}`
@@ -651,24 +528,6 @@ export class RemoteSshManager extends Service {
       if (next === undefined || settled === undefined || settled.key !== serverRuntimeKey(next)) {
         if (settled !== undefined) await this.disposeHost(settled)
         this.hosts.delete(id)
-      }
-    }
-    for (const [key, pending] of this.webProxies) {
-      const [serverId, expectedRuntimeKey] = JSON.parse(key) as [string, string, number]
-      const next = servers.get(serverId)
-      if (next === undefined || serverRuntimeKey(next) !== expectedRuntimeKey) {
-        const settled = await Promise.resolve(pending).catch(() => undefined)
-        if (settled !== undefined) await settled.dispose()
-        this.webProxies.delete(key)
-      }
-    }
-    for (const [key, pending] of this.backendTunnels) {
-      const [serverId, expectedRuntimeKey] = JSON.parse(key) as [string, string]
-      const next = servers.get(serverId)
-      if (next === undefined || serverRuntimeKey(next) !== expectedRuntimeKey) {
-        const settled = await Promise.resolve(pending).catch(() => undefined)
-        if (settled !== undefined) await settled.dispose()
-        this.backendTunnels.delete(key)
       }
     }
     this.routes.clear()
@@ -814,10 +673,15 @@ export class RemoteSshManager extends Service {
     await closeControlMaster(host.transport, host.server.sshTarget)
   }
 
+  /**
+   * Write the next catalog through SettingsForms into this plugin's own
+   * profile entry, then apply it in this instance immediately; the Loader's
+   * ordinary config update rebuilds this plugin with the same values.
+   */
   private async replaceSettings(next: ResolvedConfig): Promise<void> {
-    if (this.settings === undefined) throw new Error('dsh-remote-ssh: settings service is unavailable')
-    await this.settings.replace(next)
-    await this.refreshTail
+    if (this.entryId === undefined) throw new Error('dsh-remote-ssh: settings write requires a profile entry')
+    await this.ctx.settings.replace(this.entryId, next as unknown as object)
+    await this.queueRefresh(next)
   }
 
   private validate(config: ResolvedConfig): void {
@@ -854,15 +718,9 @@ export class RemoteSshManager extends Service {
 }
 
 function serverRuntimeKey(server: RemoteSshServer): string {
-  return JSON.stringify([server.sshTarget, server.sshArgs ?? [], server.remoteCodeCommand ?? 'code', server.sshExecutable ?? null, server.backendPort ?? DEFAULT_DSH_BACKEND_PORT])
-}
-
-function backendRuntimeKey(server: RemoteSshServer): string {
-  return JSON.stringify([server.id, serverRuntimeKey(server)])
-}
-
-function webBackendRuntimeKey(server: RemoteSshServer, localUiPort: number): string {
-  return JSON.stringify([server.id, serverRuntimeKey(server), localUiPort])
+  // backendPort is retained for config compatibility with the deferred remote
+  // Backend surface; it no longer participates in any live connection key.
+  return JSON.stringify([server.sshTarget, server.sshArgs ?? [], server.remoteCodeCommand ?? 'code', server.sshExecutable ?? null, server.backendPort ?? 0])
 }
 
 function routeRuntimeKey(route: RemoteWorkspaceRoute): string {

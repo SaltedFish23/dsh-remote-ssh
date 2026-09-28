@@ -47,13 +47,14 @@ export function apply(ctx: Context): void {
     }
   }
 
-  ctx.on('agent/created', ({ agent }) => { bind(agent) })
+  ctx.on('agent/created', ({ agent }) => { bind(agent); return undefined })
 
   // Tool registration emits this event synchronously. Only pending Agents
   // are retried, and bind removes an Agent before installing scoped effects,
   // so its own presentation registration cannot recurse.
   ctx.on('tools/change', () => {
     for (const agent of [...pending]) bind(agent)
+    return undefined
   })
 
   // Front doors such as dsh-tui create their initial Agent during startup.
@@ -64,6 +65,7 @@ export function apply(ctx: Context): void {
   ctx.on('agent/disposed', ({ agent }) => {
     pending.delete(agent)
     ctx.remoteSshManager.unbindSession(String(agent.session.header.id), agent)
+    return undefined
   })
 }
 

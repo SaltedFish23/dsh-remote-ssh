@@ -9,10 +9,11 @@ import type {
   CollectedOutput,
   ShellExecRequest,
   ShellExecSpec,
-  ShellProcess,
+  ShellExecution,
   ShellProcessRead,
   ShellRunResult,
 } from '@deepseek-ai/dsh-shell'
+import type { SubprocessOutputRead, SubprocessOutputReader } from '@deepseek-ai/dsh-subprocess'
 import z from '@deepseek-ai/schemastery'
 import type { RemoteSshRuntime } from './runtime.ts'
 import { fileUriFromPosixPath, quotePosix, WorkspacePathMapper } from './runtime.ts'
@@ -60,7 +61,7 @@ export class RemoteSshShellExecutor extends ShellExecutor {
   readonly config: ResolvedConfig
   private readonly remote: RemoteSshRuntime
   private readonly mapper: WorkspacePathMapper
-  private readonly processes = new Set<AhpShellProcess>()
+  private readonly processes = new Set<AhpShellExecution>()
 
   constructor(ctx: Context, config: Config) {
     super(ctx)
@@ -86,6 +87,7 @@ export class RemoteSshShellExecutor extends ShellExecutor {
       command: request.command,
       workdir: request.workdir ?? this.mapper.localWorkspace,
       timeoutMs,
+      onExpiry: request.onExpiry ?? 'kill',
       stdoutMaxBytes,
       signal: request.signal,
       stdin: request.stdin,
@@ -95,24 +97,16 @@ export class RemoteSshShellExecutor extends ShellExecutor {
     }
   }
 
-  override async run(spec: ShellExecSpec): Promise<ShellRunResult> {
-    const outcome = await executeTerminal(this.remote, this.mapper, this.config.shellCommand, spec, spec.stdoutMaxBytes, spec.timeoutMs)
-    return {
-      exitCode: outcome.exitCode,
-      signal: outcome.signal,
-      timedOut: outcome.timedOut,
-      aborted: outcome.aborted,
-      timeoutMs: spec.timeoutMs,
-      stdout: outcome.output.collected(),
-      stderr: { text: '', truncated: false },
-    }
-  }
-
-  override start(spec: ShellExecSpec): ShellProcess {
-    const process = new AhpShellProcess(this.remote, this.mapper, this.config.shellCommand, spec, this.config.outputMaxBytes)
+  override execute(spec: ShellExecSpec): Promise<ShellExecution> {
+    const process = new AhpShellExecution(
+      this.remote,
+      this.mapper,
+      this.config.shellCommand,
+      spec,
+    )
     this.processes.add(process)
     void process.done.finally(() => { this.processes.delete(process) })
-    return process
+    return Promise.resolve(process)
   }
 
   private validate(): void {
@@ -126,28 +120,46 @@ export class RemoteSshShellExecutor extends ShellExecutor {
   }
 }
 
-class AhpShellProcess implements ShellProcess {
+class AhpShellExecution implements ShellExecution {
   status: 'running' | 'completed' | 'killed' = 'running'
   exitCode: number | null = null
   signal: NodeJS.Signals | null = null
   readonly done: Promise<void>
+  readonly observed: { stdout: SubprocessOutputReader; stderr: SubprocessOutputReader }
 
   private readonly controller = new AbortController()
   private readonly output: TailBuffer
+  private readonly outcome: Promise<ExecutionOutcome & { spec: ShellExecSpec }>
+  private resultPromise: Promise<ShellRunResult> | undefined
 
-  constructor(remote: RemoteSshRuntime, mapper: WorkspacePathMapper, shellCommand: string, spec: ShellExecSpec, outputMaxBytes: number) {
-    this.output = new TailBuffer(outputMaxBytes)
-    this.done = executeTerminal(remote, mapper, shellCommand, { ...spec, signal: combineSignals(spec.signal, this.controller.signal) }, outputMaxBytes, 0, this.output)
-      .then((outcome) => {
-        this.exitCode = outcome.exitCode
-        this.signal = outcome.signal
-        this.status = outcome.signal === null ? 'completed' : 'killed'
-      }, (error: unknown) => {
-        this.output.append(`\n[dsh-remote-ssh infrastructure error] ${errorMessage(error)}\n`)
-        this.exitCode = null
-        this.signal = 'SIGTERM'
-        this.status = 'killed'
-      })
+  constructor(remote: RemoteSshRuntime, mapper: WorkspacePathMapper, shellCommand: string, spec: ShellExecSpec) {
+    this.output = new TailBuffer(spec.stdoutMaxBytes)
+    this.observed = {
+      stdout: offsetReader(from => this.output.readFrom(from)),
+      stderr: offsetReader(() => ({ text: '', nextOffset: 0, lossy: false })),
+    }
+    const deadlineMs = spec.onExpiry === 'none' ? 0 : spec.timeoutMs
+    this.outcome = executeTerminal(
+      remote,
+      mapper,
+      shellCommand,
+      { ...spec, signal: combineSignals(spec.signal, this.controller.signal) },
+      spec.stdoutMaxBytes,
+      deadlineMs,
+      this.output,
+    ).then(outcome => ({ ...outcome, spec }), (error: unknown) => {
+      this.output.append(`\n[dsh-remote-ssh infrastructure error] ${errorMessage(error)}\n`)
+      throw error
+    })
+    this.done = this.outcome.then((outcome) => {
+      this.exitCode = outcome.exitCode
+      this.signal = outcome.signal
+      this.status = outcome.signal === null ? 'completed' : 'killed'
+    }, () => {
+      this.exitCode = null
+      this.signal = 'SIGTERM'
+      this.status = 'killed'
+    })
   }
 
   readOutput(): ShellProcessRead {
@@ -159,6 +171,24 @@ class AhpShellProcess implements ShellProcess {
     this.controller.abort(new Error('background process killed'))
     return true
   }
+
+  result(): Promise<ShellRunResult> {
+    this.resultPromise ??= this.outcome.then(outcome => ({
+      exitCode: outcome.exitCode,
+      signal: outcome.signal,
+      timedOut: outcome.timedOut,
+      aborted: outcome.aborted,
+      timeoutMs: outcome.spec.timeoutMs,
+      stdout: outcome.output.collected(),
+      stderr: { text: '', truncated: false },
+    }))
+    return this.resultPromise
+  }
+}
+
+/** Adapt a stateless byte-offset read into the seam's non-consuming reader. */
+function offsetReader(readFrom: (fromByte: number) => SubprocessOutputRead): SubprocessOutputReader {
+  return { readFrom }
 }
 
 async function executeTerminal(
@@ -398,6 +428,17 @@ class TailBuffer {
     const delta = this.tail.subarray(start).toString('utf8')
     this.readOffset = this.total
     return { delta, lossy }
+  }
+
+  /** Non-consuming byte-offset read over the same captured tail. */
+  readFrom(fromByte: number): SubprocessOutputRead {
+    const lossy = fromByte < this.tailStart
+    const start = Math.max(fromByte, this.tailStart) - this.tailStart
+    return {
+      text: this.tail.subarray(start).toString('utf8'),
+      nextOffset: this.total,
+      lossy,
+    }
   }
 }
 

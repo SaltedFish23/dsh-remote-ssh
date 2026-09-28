@@ -70,11 +70,11 @@ async function setup() {
 describe('RemoteSshShellExecutor', () => {
   it('projects AHP terminal command actions into a ShellRunResult', async () => {
     const { ctx, client, local } = await setup()
-    const result = await ctx.shell.run(ctx.shell.resolve({
+    const result = await (await ctx.shell.execute(ctx.shell.resolve({
       command: 'printf remote-output',
       workdir: local,
       sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: local },
-    }))
+    }))).result()
     expect(result).toMatchObject({ exitCode: 7, signal: null, timedOut: false, aborted: false })
     expect(result.stdout).toEqual({ text: 'remote-output\r\n', truncated: false })
     expect(result.stderr).toEqual({ text: '', truncated: false })
@@ -84,10 +84,13 @@ describe('RemoteSshShellExecutor', () => {
 
   it('rejects restrictive modes rather than pretending a remote shell is confined', async () => {
     const { ctx, local } = await setup()
-    await expect(ctx.shell.run(ctx.shell.resolve({
-      command: 'true',
-      workdir: local,
-      sandboxPolicy: { mode: 'workspace-write', workspaceRoot: local },
-    }))).rejects.toThrow(/cannot confine arbitrary remote commands/)
+    await expect((async () => {
+      const execution = await ctx.shell.execute(ctx.shell.resolve({
+        command: 'true',
+        workdir: local,
+        sandboxPolicy: { mode: 'workspace-write', workspaceRoot: local },
+      }))
+      return execution.result()
+    })()).rejects.toThrow(/cannot confine arbitrary remote commands/)
   })
 })

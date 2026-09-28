@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import { win32 } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
-import type { Readable } from 'node:stream'
+import type { Duplex, Readable } from 'node:stream'
 import { ActionType } from '@microsoft/agent-host-protocol'
 import type { ContentEncoding, TerminalClientClaim } from '@microsoft/agent-host-protocol'
 import type { AhpClient, Subscription } from '@microsoft/agent-host-protocol/client'
 import { Context } from '@deepseek-ai/cordis'
+import type { ShellRunResult } from '@deepseek-ai/dsh-shell'
 import { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import type {
   SubprocessCollectedOutputs,
@@ -15,6 +16,8 @@ import type {
   SubprocessOutputRead,
   SubprocessOutputReader,
   SubprocessSpawnSpec,
+  SubprocessTerminalActivity,
+  SubprocessTerminalEnvironment,
   SubprocessTerminalForeground,
   SubprocessTerminalHandle,
   SubprocessTerminalSignal,
@@ -48,6 +51,13 @@ export class TransparentSubprocessRuntime extends SubprocessRuntime {
     // discovery local; a remote spawn re-resolves the executable in the
     // selected workspace's execution world.
     return this.local.resolveExecutable(command, env, signal)
+  }
+
+  override terminalEnvironment(signal?: AbortSignal): Promise<SubprocessTerminalEnvironment> {
+    // The seam has no cwd to route on; shell-selection facts follow the local
+    // host, while every remote spawn executes inside the workspace's POSIX
+    // world regardless of this answer.
+    return this.local.terminalEnvironment(signal)
   }
 
   override spawn(spec: SubprocessSpawnSpec): SubprocessHandle {
@@ -90,6 +100,8 @@ class RemoteAhpProcessHandle implements SubprocessHandle {
   readonly stdin: Writable | undefined
   readonly stdout: Readable | undefined
   readonly stderr: Readable | undefined
+  /** No separate caller-owned byte channel exists across the AHP transport. */
+  readonly control: Duplex | undefined = undefined
   readonly collected: SubprocessCollectedOutputs
   readonly done: Promise<SubprocessOutcome>
 
@@ -159,7 +171,7 @@ class RemoteAhpProcessHandle implements SubprocessHandle {
     const empty = { data: '', encoding: 'base64' as ContentEncoding }
     let writer: RemoteAhpTerminalHandle | undefined
     let completed = false
-    let run: ReturnType<typeof shell.run> | undefined
+    let run: Promise<ShellRunResult> | undefined
     try {
       await Promise.all([
         client.resourceWrite({ uri: stdoutUri, ...empty }),
@@ -173,12 +185,12 @@ class RemoteAhpProcessHandle implements SubprocessHandle {
             }),
       ])
       if (stdinMode === 'pipe') {
-        const prepared = await shell.run(shell.resolve({
+        const prepared = await (await shell.execute(shell.resolve({
           command: `rm -f -- ${quotePosix(fifoPath)} && mkfifo -- ${quotePosix(fifoPath)}`,
           workdir: this.spec.cwd,
           signal: this.controller.signal,
           sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: this.route.aliasPath },
-        }))
+        }))).result()
         if (prepared.exitCode !== 0) {
           if (this.controller.signal.aborted) return { exitCode: null, signal: prepared.signal ?? 'SIGTERM' }
           throw new Error(`dsh-remote-ssh: failed to create remote stdin FIFO (exit ${prepared.exitCode ?? prepared.signal})`)
@@ -192,7 +204,7 @@ class RemoteAhpProcessHandle implements SubprocessHandle {
         signal: this.controller.signal,
         sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: this.route.aliasPath },
       })
-      run = shell.run(resolved).finally(() => { completed = true })
+      run = shell.execute(resolved).then(execution => execution.result()).finally(() => { completed = true })
       if (stdinMode === 'pipe') {
         const endMarker = `__DSH_STDIN_EOF_${randomUUID().replaceAll('-', '')}__`
         writer = await RemoteAhpTerminalHandle.create(this.route, await this.workspace, {
@@ -200,6 +212,7 @@ class RemoteAhpProcessHandle implements SubprocessHandle {
           cwd: this.spec.cwd,
           rows: 24,
           cols: 80,
+          terminalType: 'dumb',
           graceMs: this.spec.graceMs,
           signal: this.controller.signal,
         })
@@ -297,6 +310,16 @@ class RemoteAhpTerminalHandle implements SubprocessTerminalHandle {
 
   async write(data: string): Promise<void> {
     this.client.dispatch(this.channel, { type: ActionType.TerminalInput, data })
+  }
+
+  async resize(cols: number, rows: number): Promise<void> {
+    this.client.dispatch(this.channel, { type: ActionType.TerminalResized, cols, rows })
+  }
+
+  async inspectActivity(): Promise<SubprocessTerminalActivity> {
+    // The AHP terminal exposes no foreground-shell activity probe; the merged
+    // PTY stream is the only observation surface, so report unknown.
+    return { state: 'unknown', revision: 0 }
   }
 
   async inspectForeground(): Promise<SubprocessTerminalForeground | undefined> {

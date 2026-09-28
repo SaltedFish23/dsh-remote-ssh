@@ -89,18 +89,22 @@ async function setup() {
   }
   const shell = {
     resolve(request: Record<string, unknown>) {
-      return { timeoutMs: 10_000, stdoutMaxBytes: 4096, ...request }
+      return { timeoutMs: 10_000, stdoutMaxBytes: 4096, onExpiry: 'kill', ...request }
     },
-    async run(spec: { command: string; signal?: AbortSignal }) {
-      if (spec.command.includes('wait-for-cancel')) {
-        if (!spec.signal?.aborted) await new Promise<void>(resolvePromise => spec.signal?.addEventListener('abort', () => { resolvePromise() }, { once: true }))
-        return shellResult(null, 'SIGTERM')
+    async execute(spec: { command: string; signal?: AbortSignal }) {
+      return {
+        result: async () => {
+          if (spec.command.includes('wait-for-cancel')) {
+            if (!spec.signal?.aborted) await new Promise<void>(resolvePromise => spec.signal?.addEventListener('abort', () => { resolvePromise() }, { once: true }))
+            return shellResult(null, 'SIGTERM')
+          }
+          const output = /> '([^']+)' 2> '([^']+)'$/.exec(spec.command)
+          if (output === null) throw new Error(`missing redirected outputs in ${spec.command}`)
+          client.files.set(fileUriFromPosixPath(output[1]!), Buffer.from('remote-stdout\n'))
+          client.files.set(fileUriFromPosixPath(output[2]!), Buffer.from('remote-stderr\n'))
+          return shellResult(23, null)
+        },
       }
-      const output = /> '([^']+)' 2> '([^']+)'$/.exec(spec.command)
-      if (output === null) throw new Error(`missing redirected outputs in ${spec.command}`)
-      client.files.set(fileUriFromPosixPath(output[1]!), Buffer.from('remote-stdout\n'))
-      client.files.set(fileUriFromPosixPath(output[2]!), Buffer.from('remote-stderr\n'))
-      return shellResult(23, null)
     },
   }
   let sshFallbacks = 0
