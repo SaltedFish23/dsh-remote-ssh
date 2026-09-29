@@ -6,12 +6,25 @@
  * runtime version — not just that its types compile.
  */
 import { createRequire } from 'node:module'
-import { resolve } from 'node:path'
-import { mkdtempSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { cpSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { tmpdir } from 'node:os'
 
 const profileRoot = '/tmp/dsh-mount-test'
 const runtimeRoot = '/tmp/dsh-asar/dsh/node_modules/@deepseek-ai'
+
+// Keep the fixture's plugin copy in step with this checkout: a stale copy
+// silently verifies an older build (the fixture was a one-time snapshot
+// before this sync step existed).
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const fixturePlugin = resolve(profileRoot, 'node_modules', 'dsh-remote-ssh')
+rmSync(fixturePlugin, { recursive: true, force: true })
+mkdirSync(fixturePlugin, { recursive: true })
+for (const entry of ['package.json', 'cordis.patch.yml', 'lib']) {
+  cpSync(resolve(repoRoot, entry), resolve(fixturePlugin, entry), { recursive: true })
+}
+console.log('fixture synced from', repoRoot)
 
 const profileRequire = createRequire(resolve(profileRoot, 'noop.js'))
 const runtimeRequire = createRequire(resolve(runtimeRoot, 'noop.js'))
@@ -33,6 +46,7 @@ const spillRouter = await import(profileRequire.resolve('dsh-remote-ssh/spill', 
 const agentPolicy = await import(profileRequire.resolve('dsh-remote-ssh/agent-policy', { paths: [profileRoot] }))
 const localBridge = await import(profileRequire.resolve('dsh-remote-ssh/local-bridge', { paths: [profileRoot] }))
 const searchHook = await import(profileRequire.resolve('dsh-remote-ssh/search', { paths: [profileRoot] }))
+const sidebarBridge = await import(profileRequire.resolve('dsh-remote-ssh/sidebar', { paths: [profileRoot] }))
 
 console.log('cordis:', (await import(runtimeRequire.resolve('@deepseek-ai/cordis/package.json', { paths: [runtimeRoot] }), { with: { type: 'json' } })).default.version)
 
@@ -71,9 +85,18 @@ for (const [name, value] of [
   ['agents', { list: () => [] }],
   ['systemPrompt', { variable() {}, section() {} }],
   ['shellEnv', {}],
+  // A bare cordis Context provides no loader; entries that inject it (the
+  // search parser hook and the sidebar bridge) stay pending without this
+  // stand-in, so the smoke would silently skip them.
+  ['loader', { internal: undefined, entries: () => [] }],
 ]) {
   await ctx.plugin(stub(name, value)).await?.()
 }
+
+// Anchor the plugin's profile-relative lookups at the fixture: the sidebar
+// bridge resolves its patch target from ctx.baseUrl, and a stray baseUrl
+// would let the smoke patch a real profile's bundle.
+ctx.baseUrl = pathToFileURL(`${profileRoot}/`).href
 
 // Stand in for the isolated official local providers (dsh-fs-sandbox,
 // dsh-subprocess-local, dsh-spill-local inside the remote-ssh-local-world
@@ -103,6 +126,9 @@ await ctx.plugin(asPlugin(routerSubprocess)).await?.()
 await ctx.plugin(asPlugin(spillRouter)).await?.()
 await ctx.plugin(asPlugin(agentPolicy)).await?.()
 await ctx.plugin(asPlugin(searchHook)).await?.()
+await ctx.plugin(asPlugin(sidebarBridge)).await?.()
+if (ctx.remoteSshSidebarHook === undefined) throw new Error('remoteSshSidebarHook service did not start')
+console.log('sidebar bridge armed: remoteSshSidebarHook provided')
 
 const expected = [
   '/plugins/dsh-remote-ssh/state',

@@ -46,6 +46,10 @@
       "types": "./lib/search.d.ts",
       "default": "./lib/search.js"
     },
+    "./sidebar": {
+      "types": "./lib/sidebar.d.ts",
+      "default": "./lib/sidebar.js"
+    },
     "./manager": {
       "types": "./lib/manager.d.ts",
       "default": "./lib/manager.js"

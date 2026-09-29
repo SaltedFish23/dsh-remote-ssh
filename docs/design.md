@@ -25,7 +25,13 @@ ordinary tools ─ routers ─┤
 - Remote `bash`：官方 `dsh-tool-bash` → Bash `ctx.shell` → 路由后的 AHP Terminal channel；所有 channel 复用 host 级 SSH/AHP 长连接，不重新握手；
 - `TransparentShellExecutor`：保留给非模型工具的 one-shot shell consumer；
 - 内置 `tool-fs-search` 保持原名并复用 routed subprocess，因此 `rg` 在当前 workspace 主机解析；
-- background handle 也由同一 subprocess 路由产生。
+- background handle 也由同一 subprocess 路由产生；
+- `sidebar`：第三方 `dsh-better-sidebar` 直接用本机 `git` 二进制、本机 `readdir` 与本机 `fs` 触碰工作区，远端会话的 cwd 是空 alias 目录，因此其 SCM 面板报"不是 git 仓库"、文件树为空、编辑器读不到文件。桥接在三个 stock 函数入口各注入一个远端分支（分支在函数首部同步判断，命中远端 world 才接管，否则原样落回本机实现）：
+  - `runGit`：cwd 命中远端 world 时命令改在对应 SSH 主机执行——stdout/stderr 重定向到 host runtime 私有文件再经 AHP base64 读回，porcelain `-z` 的 NUL 字节不经过 PTY；非零退出按 stock `GitCommandError` 的形状（message + `code: 'git-error'` + `command`）拒绝。`rev-parse --show-toplevel` 与 `worktree list` 返回的根路径会被记录，使位于 workspace remotePath 之上的仓库根和 linked worktree 的后续调用仍固定到同一远端（本地存在同名路径时不固定，避免劫持真实的本地会话）。
+  - `readDirectory`：每层目录一次 AHP `resourceList`（绝不做 N+1 resolve/stat 游走），行路径落在远端 POSIX 空间——与 git 根和工具事件路径同空间，变更/读取标记继续匹配。
+  - `readText`：经该 workspace 的 AHP fs 做 stat + 读取，保留 stock 的 truncated/binary/head 契约。
+
+  注入方式：分支不通过 loader hook 注入，而是**写入已安装的 `dsh-better-sidebar/lib/index.js`**（幂等、原文件留 `.dsh-remote-ssh-bak`、签名漂移则拒绝改写并保持 stock）。原因是 Node 的 loader hook（`registerHooks` 与 `module.register`）都无法追溯已经初始化的 internal cascaded loader，而宿主在任何插件运行前就完成了初始化——实测两者对后续 `loader.internal.import()` 均不生效。因此桥接 entry 只注册 `globalThis[Symbol.for(...)]` 分支实现并打补丁；对"本轮启动已抢先 import 的 sidebar"，延迟自愈会清 cache 后 `_dispose`+`init` 重挂它，重挂读取的即是已打补丁的文件。profile 用户层的门控行（`better-sidebar` entry 注入 `remoteSshSidebarHook`）仍推荐保留：它让 sidebar 在桥接就绪后才挂载，常规路径不需要重挂（门控只约束 entry 的 fiber 启动，不约束模块 import，这正是补丁必须落盘的原因）。
 
 ## Catalog 与标题
 

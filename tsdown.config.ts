@@ -11,6 +11,7 @@ export default [
       "binary-fs": "src/transport/binary-fs.ts",
       shell: "src/transport/shell.ts",
       search: "src/transport/search.ts",
+      sidebar: "src/transport/sidebar.ts",
       manager: "src/routing/manager.ts",
       "router-fs": "src/routing/fs.ts",
       "router-subprocess": "src/routing/subprocess.ts",

@@ -67,6 +67,19 @@
       name: dsh-remote-ssh/search
       inject: [remoteSshManager]
 
+    # Route dsh-better-sidebar's SCM panel, explorer listings, and editor
+    # reads through the workspace's execution world (module-source transform,
+    # same technique as the search hook above). The entry carries no service
+    # injects so it arms its transform as early as the concurrent entry start
+    # allows; profiles that mount dsh-better-sidebar from a later bundle layer
+    # should additionally gate that entry on remoteSshSidebarHook from the
+    # user patch layer, which applies after every bundle layer — a bundle
+    # patch here CANNOT do it: this layer runs before the sidebar's own layer
+    # inserts the entry, so an id-targeted row would always miss.
+    - id: remote-ssh-sidebar-bridge
+      name: dsh-remote-ssh/sidebar
+      inject: [loader]
+
     # Preserve the process-host dialect for non-tool shell consumers (hooks,
     # permission capability inspection). Visible bash/pwsh tools below each
     # bind their own explicit dialect while sharing the same cwd router.
@@ -144,6 +157,17 @@
 # and resolves `rg` through the routed subprocess service).
 - id: tool-fs-search
   inject: [remoteSshSearchHook]
+
+# NOTE: gating the dsh-better-sidebar entry on remoteSshSidebarHook belongs
+# in the PROFILE's own cordis.patch.yml (the user layer applies after every
+# bundle layer, so the entry already exists when the patch runs):
+#
+#   - id: better-sidebar
+#     name: dsh-better-sidebar
+#     inject: [remoteSshSidebarHook]
+#
+# See README "Sidebar bridging" — the bridge also self-heals by remounting an
+# already-imported sidebar when that line is absent.
 
 - id: spill-local
   disabled: true

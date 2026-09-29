@@ -20,6 +20,7 @@ Host tunnel 则通过 [dsh-host](https://github.com/Yan-Zero/dsh-host) 让任意
 - 文件系统、搜索、子进程、后台任务和终端都根据当前工作区透明路由；
 - 为 `dsh-codex` 生图等制品插件提供二进制工作区写入；原始字节只在 AHP `resourceWrite` 传输内部编码为 base64；
 - 远端搜索结果始终使用 POSIX 路径；超长工具结果保存在对应 SSH 主机的私有运行目录，可继续用 `read`/`grep` 分页读取；
+- 安装了 `dsh-better-sidebar` 时，其"文件变动"git 面板、文件树与编辑器读取在远端工作区同样可用：git 命令、目录列举与文件读取透明地在对应 SSH 主机执行，而不是误读本机空 alias 目录。桥接把三个远端分支写入已安装的 sidebar bundle（幂等；原文件保留为 `lib/index.js.dsh-remote-ssh-bak`；签名不符则不改写并保持原行为）。建议在该 profile 的 `cordis.patch.yml` 用户层加一行门控（见 INSTALL.md）以避免启动期重挂；未加时桥接会清缓存并重挂 sidebar 完成自愈；未安装该 bundle 时桥接整体休眠；
 - POSIX 远端工作区只显示 `bash`，Windows 本机工作区只显示 `pwsh`；
 - 远端文件链接通过本机 VSC 兼容编辑器的 Remote SSH 打开；不可用时下载快照并在本机打开；
 - 每台服务器复用一条 SSH/AHP 长连接；每次 Bash 调用像 VS Code 新建终端标签页一样打开独立 channel，不会重新进行 SSH 握手；

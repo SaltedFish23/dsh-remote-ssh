@@ -49,6 +49,10 @@ describe('bundle overlay', () => {
     expect(byId.get('remote-ssh-subprocess-router')).toMatchObject({ name: 'dsh-remote-ssh/router-subprocess' })
     expect(byId.get('remote-ssh-spill-router')).toMatchObject({ name: 'dsh-remote-ssh/spill' })
     expect(byId.get('remote-ssh-search')).toMatchObject({ name: 'dsh-remote-ssh/search' })
+    expect(byId.get('remote-ssh-sidebar-bridge')).toMatchObject({
+      name: 'dsh-remote-ssh/sidebar',
+      inject: ['loader'],
+    })
     expect(byId.has('remote-ssh-tool-fs-search')).toBe(false)
     expect(byId.get('remote-ssh-shell-default')).toMatchObject({ name: 'dsh-remote-ssh/shell-transparent' })
     expect(byId.get('remote-ssh-bash')).toMatchObject({ name: 'cordis:group' })
@@ -75,5 +79,20 @@ describe('bundle overlay', () => {
     expect(source).not.toContain('dsh-tool-bash-persistent')
     expect(new Set(shellChildren.map(row => row.id)).size).toBe(shellChildren.length)
     expect(rows.some(row => String(row.name).includes('remote-tool'))).toBe(false)
+  })
+
+  it('keeps sidebar gating out of the bundle layer', () => {
+    // Entries created by LATER bundle layers (dsh-better-sidebar inserts
+    // itself) cannot be targeted by this overlay — its layer runs first, so
+    // an id-targeted row would always warn and miss. Gating belongs to the
+    // profile's own cordis.patch.yml; the bridge self-heals without it.
+    const source = readFileSync(join(import.meta.dirname, '..', 'cordis.patch.yml'), 'utf8')
+    expect(source).toContain('remoteSshSidebarHook')
+    const patches = load(source, { schema: entryListSchema }) as PatchOptions[]
+    const warnings: string[] = []
+    applyEntryPatches([...BASE_ROWS, { id: 'better-sidebar', name: 'dsh-better-sidebar' }], patches, (message, ...args) => {
+      warnings.push([message, ...args].join(' '))
+    })
+    expect(warnings).toEqual([])
   })
 })

@@ -178,6 +178,31 @@ Create or open a disposable session in the new remote workspace. Verify with ord
 
 Do not create or modify files outside the user-approved test workspace.
 
+### Optional dsh-better-sidebar bridging
+
+When the profile also mounts `dsh-better-sidebar`, append this row to the
+profile's own `cordis.patch.yml` (the user layer, which applies after every
+bundle layer — an in-bundle patch cannot target the sidebar entry because this
+bundle's layer runs first):
+
+```yaml
+- id: better-sidebar
+  name: dsh-better-sidebar
+  inject: [remoteSshSidebarHook]
+```
+
+The row makes the sidebar mount after the Remote SSH bridge has registered its
+branches, so its SCM panel, explorer listings, and editor reads run in the
+session's execution world. The bridge writes the three remote branches into
+the installed `dsh-better-sidebar/lib/index.js` (idempotent; the unpatched
+original is kept as `lib/index.js.dsh-remote-ssh-bak`; a bundle whose stock
+signatures drifted is left untouched and keeps stock behavior). Without the
+row the bridge still self-heals: it purges the cached module and remounts the
+sidebar shortly after boot. Remove the row when uninstalling dsh-remote-ssh,
+or the sidebar would wait on a missing service; restore the `.dsh-remote-ssh-bak`
+file to return the bundle to stock. Restart the host after editing the profile
+layer.
+
 ### Optional full Backend mode
 
 This is separate from the AHP workspace flow. Use it only when the user wants
