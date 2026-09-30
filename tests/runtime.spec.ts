@@ -109,7 +109,7 @@ describe('RemoteSshRuntime', () => {
     }
   })
 
-  it('notices a link that closed without any request and reconnects on the next call', async () => {
+  it('notices a link that closed without any request and heals in the background', async () => {
     const ctx = new Context()
     const clients: FakeClient[] = []
     openFactory = () => trackClients(clients, new OpaqueClient())
@@ -119,11 +119,12 @@ describe('RemoteSshRuntime', () => {
       await runtime.getConnection()
 
       clients[0]!.close()
-      await new Promise(resolvePromise => { setTimeout(resolvePromise, 0) })
-      expect(runtime.connected).toBe(false)
+      await flushBackground()
 
-      await runtime.getConnection()
+      expect(runtime.connected).toBe(true)
       expect(clients).toHaveLength(2)
+      const second = await runtime.getConnection()
+      expect(second.client).toBe(clients[1])
     } finally {
       openFactory = undefined
       await ctx.fiber.dispose()
@@ -163,7 +164,87 @@ describe('RemoteSshRuntime', () => {
     expect(clients[0]!.connectionState.status).toBe('closed')
     await expect(runtime.getConnection()).rejects.toThrow(/disposing/)
   })
+
+  it('heals a dead link in the background without a consumer request', async () => {
+    const ctx = new Context()
+    const clients: FakeClient[] = []
+    openFactory = () => trackClients(clients)
+    try {
+      await ctx.plugin(TestRuntime, { sshTarget: 'test-host' })
+      const runtime = ctx.remoteSsh
+      await runtime.getConnection()
+      expect(clients).toHaveLength(1)
+
+      clients[0]!.close()
+      await flushBackground()
+
+      expect(clients).toHaveLength(2)
+      const second = await runtime.getConnection()
+      expect(second.client).toBe(clients[1])
+      expect(runtime.connected).toBe(true)
+    } finally {
+      openFactory = undefined
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('lets a concurrent consumer join the background recovery', async () => {
+    const ctx = new Context()
+    const clients: FakeClient[] = []
+    openFactory = () => trackClients(clients)
+    try {
+      await ctx.plugin(TestRuntime, { sshTarget: 'test-host' })
+      const runtime = ctx.remoteSsh
+      await runtime.getConnection()
+
+      clients[0]!.close()
+      const joined = runtime.getConnection()
+      await flushBackground()
+
+      const settled = await runtime.getConnection()
+      expect(await joined).toBe(settled)
+      expect(clients).toHaveLength(2)
+    } finally {
+      openFactory = undefined
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps the next consumer call working after a failed background bootstrap', async () => {
+    const ctx = new Context()
+    const clients: FakeClient[] = []
+    let failNextOpen = false
+    openFactory = () => {
+      if (failNextOpen) {
+        failNextOpen = false
+        throw new Error('ssh: connect timed out')
+      }
+      return trackClients(clients)
+    }
+    try {
+      await ctx.plugin(TestRuntime, { sshTarget: 'test-host' })
+      const runtime = ctx.remoteSsh
+      await runtime.getConnection()
+
+      failNextOpen = true
+      clients[0]!.close()
+      await flushBackground()
+      expect(clients).toHaveLength(1)
+
+      const second = await runtime.getConnection()
+      expect(second.client).toBe(clients[1])
+      expect(clients).toHaveLength(2)
+    } finally {
+      openFactory = undefined
+      await ctx.fiber.dispose()
+    }
+  })
 })
+
+/** Let background recovery microtasks (and one macrotask) settle. */
+async function flushBackground(): Promise<void> {
+  await new Promise<void>(resolvePromise => { setTimeout(resolvePromise, 0) })
+}
 
 describe('RemoteSshRuntime heartbeat', () => {
   afterEach(() => {
@@ -193,17 +274,19 @@ describe('RemoteSshRuntime heartbeat', () => {
       clients[0]!.pingBehavior = 'hang'
       await vi.advanceTimersByTimeAsync(30_000)
       expect(clients[0]!.pings).toBe(1)
-      expect(runtime.connected).toBe(true)
+      expect(clients).toHaveLength(1)
 
       await vi.advanceTimersByTimeAsync(59_999)
-      expect(runtime.connected).toBe(true)
+      expect(clients).toHaveLength(1)
 
+      // Deadline expired: probing stopped and the background recovery
+      // opened a replacement without any consumer request.
       await vi.advanceTimersByTimeAsync(1)
-      expect(runtime.connected).toBe(false)
+      expect(clients).toHaveLength(2)
+      expect(clients[0]!.pings).toBe(1)
 
       const second = await runtime.getConnection()
-      expect(second.client).not.toBe(clients[0])
-      expect(clients).toHaveLength(2)
+      expect(second.client).toBe(clients[1])
     } finally {
       openFactory = undefined
       await ctx.fiber.dispose()
@@ -226,7 +309,8 @@ describe('RemoteSshRuntime heartbeat', () => {
 
       clients[0]!.pingBehavior = new Error('connection reset')
       await vi.advanceTimersByTimeAsync(30_000)
-      expect(runtime.connected).toBe(false)
+      expect(clients[0]!.pings).toBe(1)
+      expect(clients).toHaveLength(2)
     } finally {
       openFactory = undefined
       await ctx.fiber.dispose()
@@ -273,11 +357,12 @@ describe('RemoteSshRuntime heartbeat', () => {
 
       clients[0]!.pingBehavior = new Error('connection reset')
       await vi.advanceTimersByTimeAsync(30_000)
-      expect(clients[0]!.pings).toBe(1)
-      expect(runtime.connected).toBe(false)
+      expect(clients).toHaveLength(2)
 
+      // The replacement link owns the next probes; the dead one is silent.
       await vi.advanceTimersByTimeAsync(3 * 30_000)
       expect(clients[0]!.pings).toBe(1)
+      expect(clients[1]!.pings).toBe(3)
     } finally {
       openFactory = undefined
       await ctx.fiber.dispose()
@@ -301,7 +386,9 @@ describe('RemoteSshRuntime heartbeat', () => {
       clients[0]!.close()
       await vi.advanceTimersByTimeAsync(30_000)
       expect(clients[0]!.pings).toBe(0)
-      expect(runtime.connected).toBe(false)
+      expect(clients).toHaveLength(2)
+      expect(clients[1]!.pings).toBe(1)
+      expect(runtime.connected).toBe(true)
     } finally {
       openFactory = undefined
       await ctx.fiber.dispose()

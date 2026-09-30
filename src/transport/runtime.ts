@@ -199,6 +199,8 @@ export class RemoteSshRuntime extends Service {
   private generation = 0
   /** Periodic protocol-level liveness probe of {@link live}; see {@link startHeartbeat}. */
   private heartbeatTimer: NodeJS.Timeout | undefined
+  /** Guards against stacking probes while one awaits its pong deadline. */
+  private heartbeatInFlight = false
   private disposed = false
 
   constructor(ctx: Context, config: Config) {
@@ -336,8 +338,19 @@ export class RemoteSshRuntime extends Service {
   }
 
   private markStale(): void {
-    if (this.disposed) return
+    if (this.disposed || this.stale) return
     this.stale = true
+    this.reconnectInBackground()
+  }
+
+  /**
+   * Heal a dead link without waiting for the next consumer request. The
+   * shared single-flight attempt means a concurrent consumer call joins the
+   * same recovery instead of racing a private one. A failed bootstrap keeps
+   * its diagnostic for the next consumer call; the retry loop owns retries.
+   */
+  private reconnectInBackground(): void {
+    void this.getConnection().catch(() => undefined)
   }
 
   /**
@@ -360,15 +373,23 @@ export class RemoteSshRuntime extends Service {
   }
 
   private async probeHeartbeat(client: AhpClient): Promise<void> {
-    if (this.disposed || this.live !== client || this.stale) return
+    // One outstanding probe at a time: a link slow enough to still owe a pong
+    // gets no second ping until it answers or misses the deadline.
+    if (this.disposed || this.live !== client || this.stale || this.heartbeatInFlight) return
+    this.heartbeatInFlight = true
     try {
       await withDeadline(client.ping(), this.config.heartbeatTimeoutMs, 'dsh-remote-ssh: Agent Host heartbeat timed out')
     } catch {
+      // The link may have been replaced while the probe was in flight; the
+      // timer and the stale flag then belong to the new link, not this one.
+      if (this.disposed || this.live !== client) return
       // Stop probing once the link is declared dead; teardown and reopening
       // stay owned by the shared connection attempt so consumers race one
       // recovery instead of a private one.
       this.stopHeartbeat()
       this.markStale()
+    } finally {
+      this.heartbeatInFlight = false
     }
   }
 
