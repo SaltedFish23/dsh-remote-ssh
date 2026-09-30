@@ -643,16 +643,36 @@ export class RemoteSshManager extends Service {
     }
   }
 
+  /**
+   * Resolve one server's shared host runtime, replacing a runtime whose Agent
+   * Host link is gone. A closed link is permanent for that runtime, so reusing
+   * it would fail every remote call — and every turn — until DSH restarts.
+   */
   private async hostContext(server: RemoteSshServer): Promise<RemoteHostContext> {
-    let pending = this.hosts.get(server.id)
-    if (pending === undefined) {
-      pending = this.createHostContext(server)
-      this.hosts.set(server.id, pending)
-      void pending.catch(() => {
+    for (let attempt = 0; ; attempt += 1) {
+      let pending = this.hosts.get(server.id)
+      if (pending === undefined) {
+        pending = this.createHostContext(server)
+        this.hosts.set(server.id, pending)
+        void pending.catch(() => {
+          if (this.hosts.get(server.id) === pending) this.hosts.delete(server.id)
+        })
+      }
+      let host: RemoteHostContext
+      try {
+        host = await pending
+      } catch (error: unknown) {
         if (this.hosts.get(server.id) === pending) this.hosts.delete(server.id)
-      })
+        throw error
+      }
+      // A concurrent refresh replaced this runtime while it was starting.
+      if (this.hosts.get(server.id) !== pending) continue
+      // Only a definite `false` proves the link is gone; a runtime that does
+      // not report its state keeps the previous reuse behavior.
+      if (host.remote.connected !== false || attempt >= 1) return host
+      await this.disposeHost(host).catch(() => {})
+      this.hosts.delete(server.id)
     }
-    return pending
   }
 
   private async createWorkspaceShellContext(route: RemoteWorkspaceRoute, dialect: 'bash' | 'pwsh'): Promise<RemoteWorkspaceShellContext> {

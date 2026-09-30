@@ -2,6 +2,7 @@ import { resolve } from 'node:path'
 import { AhpErrorCodes } from '@microsoft/agent-host-protocol'
 import type { AhpClient } from '@microsoft/agent-host-protocol/client'
 import { RpcError } from '@microsoft/agent-host-protocol/client'
+import { ClientClosedError } from '@microsoft/agent-host-protocol/client'
 import { Context } from '@deepseek-ai/cordis'
 import { FsVersion } from '@deepseek-ai/dsh-fs'
 import type { RemoteSshRuntime } from '../src/transport/runtime.ts'
@@ -121,6 +122,67 @@ describe('RemoteSshFileSystem', () => {
     await expect(fs.writeText(denied, 'blocked\n', { kind: 'createIfAbsent' }, undefined, {
       mode: 'workspace-write', workspaceRoot: local,
     })).rejects.toMatchObject({ code: 'FS_SANDBOX_DENIED' })
+    await ctx.fiber.dispose()
+  })
+
+  it('reconnects and retries one idempotent read after the Agent Host link closes', async () => {
+    const ctx = new Context()
+    const client = new FakeAhp()
+    const local = resolve('tests', 'remote-alias')
+    let handedOut = 0
+    let invalidated = 0
+    let closed = false
+    const flaky = {
+      resourceResolve: async (params: { uri: string; followSymlinks?: boolean }) => {
+        if (!closed) {
+          closed = true
+          throw new ClientClosedError()
+        }
+        return client.resourceResolve(params)
+      },
+    }
+    const runtime = {
+      mapper: new WorkspacePathMapper(local, '/srv/project'),
+      getClient: async () => { handedOut += 1; return flaky as unknown as AhpClient },
+      invalidateConnection: () => { invalidated += 1 },
+    } as unknown as RemoteSshRuntime
+    ctx.provide('remoteSsh', runtime)
+    await ctx.plugin(RemoteSshFileSystem, { diffBasisMaxBytes: 1024, maxReadBytes: 4096 })
+
+    // This is the turn-start project-root probe: a closed link used to fail the
+    // whole turn, so the read must be replayed against a fresh connection.
+    const target = await (ctx.fs as RemoteSshFileSystem).resolve('readme.txt', { cwd: local })
+    expect(target.displayPath).toBe('/srv/project/readme.txt')
+    expect(invalidated).toBe(1)
+    expect(handedOut).toBe(2)
+    await ctx.fiber.dispose()
+  })
+
+  it('never replays a mutation after the Agent Host link closes', async () => {
+    const ctx = new Context()
+    const client = new FakeAhp()
+    const local = resolve('tests', 'remote-alias')
+    let writes = 0
+    const dead = {
+      resourceResolve: (params: { uri: string }) => client.resourceResolve(params),
+      resourceWrite: async () => {
+        writes += 1
+        throw new ClientClosedError()
+      },
+    }
+    const runtime = {
+      mapper: new WorkspacePathMapper(local, '/srv/project'),
+      getClient: async () => dead as unknown as AhpClient,
+      invalidateConnection: () => { throw new Error('a mutation must never force a reconnect replay') },
+    } as unknown as RemoteSshRuntime
+    ctx.provide('remoteSsh', runtime)
+    await ctx.plugin(RemoteSshFileSystem, { diffBasisMaxBytes: 1024, maxReadBytes: 4096 })
+
+    const fs = ctx.fs as RemoteSshFileSystem
+    const target = await fs.resolve('new.txt', { cwd: local })
+    await expect(fs.writeText(target, 'alpha\n', { kind: 'createIfAbsent' }))
+      .rejects.toThrow(/write failed for "\/srv\/project\/new\.txt": client shut down/)
+    expect(writes).toBe(1)
     await ctx.fiber.dispose()
   })
 })

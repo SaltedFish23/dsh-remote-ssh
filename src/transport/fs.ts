@@ -1,7 +1,7 @@
 import { posix } from 'node:path'
 import type { ContentEncoding, ResourceResolveResult } from '@microsoft/agent-host-protocol'
 import { AhpErrorCodes } from '@microsoft/agent-host-protocol'
-import { RpcError } from '@microsoft/agent-host-protocol/client'
+import { ClientClosedError, RpcError, TransportError, type AhpClient } from '@microsoft/agent-host-protocol/client'
 import { Context } from '@deepseek-ai/cordis'
 import { FileSystem, FsError, FsTargetKey, FsVersion } from '@deepseek-ai/dsh-fs'
 import type {
@@ -174,8 +174,7 @@ export class RemoteSshFileSystem extends FileSystem {
       throw new FsError(`cannot read "${target.displayPath}": file exceeds ${maxBytes} bytes`, 'FS_TOO_LARGE')
     }
     try {
-      const client = await this.remote.getClient()
-      const result = await client.resourceRead({ uri: this.fileUrl(target), encoding: BASE64 })
+      const result = await this.readThrough(client => client.resourceRead({ uri: this.fileUrl(target), encoding: BASE64 }))
       throwIfAborted(signal, 'read')
       const bytes = result.encoding === BASE64
         ? Buffer.from(result.data, 'base64')
@@ -202,8 +201,7 @@ export class RemoteSshFileSystem extends FileSystem {
   override async listDir(target: FsTarget, signal?: AbortSignal): Promise<FsDirEntry[]> {
     throwIfAborted(signal, 'list')
     try {
-      const client = await this.remote.getClient()
-      const listed = await client.resourceList({ uri: this.fileUrl(target) })
+      const listed = await this.readThrough(client => client.resourceList({ uri: this.fileUrl(target) }))
       const entries: FsDirEntry[] = []
       for (const entry of listed.entries.sort((a, b) => a.name.localeCompare(b.name))) {
         throwIfAborted(signal, 'list')
@@ -388,9 +386,27 @@ export class RemoteSshFileSystem extends FileSystem {
     }
   }
 
+  /**
+   * Run one idempotent read through the shared Agent Host connection.
+   *
+   * The link can die between handing out a client and delivering the request
+   * (SSH drop, host sleep, Agent Host restart). Reads are safe to repeat, so a
+   * closed-connection failure forces a reconnect and retries exactly once.
+   * Mutations deliberately never take this path: replaying one the remote may
+   * already have applied would duplicate its effect.
+   */
+  private async readThrough<T>(run: (client: AhpClient) => Promise<T>): Promise<T> {
+    try {
+      return await run(await this.remote.getClient())
+    } catch (error: unknown) {
+      if (!isConnectionClosed(error)) throw error
+      this.remote.invalidateConnection()
+      return run(await this.remote.getClient())
+    }
+  }
+
   private async resolveUri(uri: string, followSymlinks: boolean): Promise<ResourceResolveResult> {
-    const client = await this.remote.getClient()
-    return client.resourceResolve({ uri, followSymlinks })
+    return this.readThrough(client => client.resourceResolve({ uri, followSymlinks }))
   }
 
   private async probe(target: FsTarget, followSymlinks: boolean): Promise<Probe | undefined> {
@@ -444,6 +460,11 @@ function resourceType(type: ResourceResolveResult['type']): 'file' | 'directory'
 
 function isNotFound(error: unknown): boolean {
   return error instanceof RpcError && error.code === AhpErrorCodes.NotFound
+}
+
+/** True when the Agent Host connection itself is gone rather than the request. */
+function isConnectionClosed(error: unknown): boolean {
+  return error instanceof ClientClosedError || (error instanceof TransportError && error.kind === 'closed')
 }
 
 function mapFsError(operation: string, path: string, error: unknown): FsError {

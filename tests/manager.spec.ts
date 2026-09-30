@@ -341,4 +341,50 @@ describe('RemoteSshManager', () => {
       await rm(root, { recursive: true, force: true })
     }
   })
+
+  it('replaces a shared host runtime whose Agent Host link is gone', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-remote-ssh-manager-'))
+    const ctx = await createContext()
+    try {
+      await ctx.plugin(RemoteSshManager, {
+        aliasRoot: root,
+        servers: [{ id: 'devbox', label: 'Devbox', sshTarget: 'test-devbox' }],
+        workspaces: [{ id: 'project-a', serverId: 'devbox', remotePath: '/srv/project-a' }],
+      })
+      const manager = ctx.remoteSshManager
+      let creations = 0
+      let disposed = 0
+      ;(manager as unknown as { createHostContext(server: unknown): Promise<unknown> }).createHostContext = async () => {
+        const index = creations
+        creations += 1
+        return {
+          ctx: new Context(),
+          // The first runtime reports a dead link; its replacement is healthy.
+          remote: { connected: index !== 0, marker: `runtime-${index}` },
+          key: JSON.stringify(['test-devbox', [], 'code', null]),
+          server: { id: 'devbox', label: 'Devbox', sshTarget: 'test-devbox' },
+          transport: { executable: 'ssh', args: [], multiplexed: false },
+        }
+      }
+      ;(manager as unknown as { disposeHost(host: unknown): Promise<void> }).disposeHost = async () => {
+        disposed += 1
+      }
+
+      // The very first call must self-heal: a host whose link is gone is
+      // replaced instead of being handed to the caller.
+      const first = await manager.workspaceContext(manager.workspace('project-a'))
+      expect(first.remote).toMatchObject({ marker: 'runtime-1' })
+      expect(creations).toBe(2)
+      expect(disposed).toBe(1)
+
+      // The healthy replacement is reused rather than rebuilt on every call.
+      const second = await manager.workspaceContext(manager.workspace('project-a'))
+      expect(second.remote).toBe(first.remote)
+      expect(creations).toBe(2)
+      expect(disposed).toBe(1)
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
 })

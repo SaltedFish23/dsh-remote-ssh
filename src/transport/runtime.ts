@@ -156,9 +156,21 @@ export class RemoteSshRuntime extends Service {
   readonly runtimeRoot: string
   readonly remoteAccessRoot: string
 
-  private readonly ready: Promise<AhpConnection>
+  /**
+   * The current connection attempt. Replaced whenever the Agent Host link is
+   * known to be gone: the previous Agent Host tunnel is a single physical SSH
+   * session, so a dropped link must be reopened instead of being served
+   * forever from a cache.
+   */
+  private connection: Promise<AhpConnection> | undefined
   private tunnel: ChildProcessWithoutNullStreams | undefined
   private embeddedAgentHost: ChildProcessWithoutNullStreams | undefined
+  /** Client of the settled {@link connection}, used to judge liveness. */
+  private live: AhpClient | undefined
+  /** Set once the current connection is known dead and must be reopened. */
+  private stale = false
+  /** Connection-attempt counter; one remote Host instance per attempt. */
+  private generation = 0
   private disposed = false
 
   constructor(ctx: Context, config: Config) {
@@ -174,13 +186,14 @@ export class RemoteSshRuntime extends Service {
     this.runtimeRoot = posix.join(this.config.remoteRuntimeRoot, this.clientId)
     this.validate()
     if (this.mapper !== undefined) mkdirSync(this.mapper.localWorkspace, { recursive: true })
-    this.ready = this.open()
-    void this.ready.catch(() => {})
+    this.begin()
     ctx.effect(() => async () => {
       this.disposed = true
+      const pending = this.connection
+      this.connection = undefined
+      this.live = undefined
       try {
-        const connection = await this.ready
-        await connection.client.shutdown()
+        if (pending !== undefined) await (await pending).client.shutdown()
       } catch {
         // A failed startup owns its original diagnostic.
       } finally {
@@ -190,15 +203,110 @@ export class RemoteSshRuntime extends Service {
     }, 'Remote SSH AHP teardown')
   }
 
+  /**
+   * Whether the Agent Host link is usable. A host runtime whose link died must
+   * be discarded by its owner instead of being reused, so cached consumers
+   * (workspace fs/shell contexts) do not keep failing on a closed client.
+   * A connection still starting or still being retried reads as connected.
+   */
+  get connected(): boolean {
+    if (this.disposed || this.stale) return false
+    return this.live === undefined || this.live.connectionState.status !== 'closed'
+  }
+
+  /**
+   * Resolve the shared connection, reopening it when the previous one is gone.
+   * Concurrent callers share one attempt, and a link that closes while a caller
+   * waits for it produces a fresh attempt rather than a `ClientClosedError`.
+   */
   async getConnection(): Promise<AhpConnection> {
     if (this.disposed) throw new Error('Remote SSH service is disposing')
-    const connection = await this.ready
-    if (this.disposed) throw new Error('Remote SSH service is disposing')
-    return connection
+    for (let attempt = 0; ; attempt += 1) {
+      const pending = this.connection ?? this.begin()
+      let connection: AhpConnection
+      try {
+        connection = await pending
+      } catch (error: unknown) {
+        if (this.connection === pending) this.connection = undefined
+        throw error
+      }
+      if (this.disposed) throw new Error('Remote SSH service is disposing')
+      if (this.usable(connection)) return connection
+      if (this.connection === pending) this.retire()
+      if (attempt >= 1) throw new Error('dsh-remote-ssh: the remote Agent Host connection closed again immediately after reconnecting')
+    }
   }
 
   async getClient(): Promise<AhpClient> {
     return (await this.getConnection()).client
+  }
+
+  /**
+   * Drop the current connection so the next call must open a fresh one. Used
+   * by idempotent reads that raced a link change between client hand-out and
+   * request delivery; the dead tunnel is torn down with it.
+   */
+  invalidateConnection(): void {
+    if (this.disposed) return
+    this.retire()
+  }
+
+  /** Queue one connection attempt and attach its liveness watchers. */
+  private begin(): Promise<AhpConnection> {
+    const pending = this.open().then(connection => {
+      if (this.connection !== pending) return connection
+      this.live = connection.client
+      this.stale = false
+      this.watch(connection)
+      return connection
+    })
+    this.connection = pending
+    void pending.catch(() => {
+      if (this.connection === pending) this.connection = undefined
+    })
+    return pending
+  }
+
+  private usable(connection: AhpConnection): boolean {
+    if (this.stale) return false
+    if (this.live !== undefined && this.live !== connection.client) return false
+    return connection.client.connectionState.status !== 'closed'
+  }
+
+  private retire(): void {
+    const pending = this.connection
+    this.connection = undefined
+    this.live = undefined
+    this.stale = false
+    void pending?.catch(() => {})
+    this.tunnel?.kill()
+    this.tunnel = undefined
+    this.embeddedAgentHost?.kill()
+    this.embeddedAgentHost = undefined
+  }
+
+  /**
+   * Watch the link for closure. The AHP client publishes its own state, and an
+   * SSHD-side disconnect also kills the tunnel child; either one marks this
+   * runtime stale so the next call reconnects instead of failing the turn.
+   */
+  private watch(connection: AhpConnection): void {
+    const client = connection.client
+    void (async () => {
+      try {
+        for await (const state of client.stateChanges()) {
+          if (state.status === 'closed') break
+        }
+      } catch {
+        // A terminated transition stream is itself a closure signal.
+      }
+      if (this.live === client) this.markStale()
+    })()
+  }
+
+  private markStale(): void {
+    if (this.disposed) return
+    this.stale = true
   }
 
   /** Workspace mapper for the legacy single-workspace providers. */
@@ -227,7 +335,11 @@ export class RemoteSshRuntime extends Service {
     }
   }
 
-  private async open(): Promise<AhpConnection> {
+  /** Open one Agent Host connection. Overridable so tests can drive the link. */
+  protected async open(): Promise<AhpConnection> {
+    // A reopened link must not target the remote Host instance left behind by
+    // the previous tunnel, so every attempt gets its own instance id.
+    this.generation += 1
     if (this.config.directUrl !== undefined) return this.connectEndpoint(this.config.directUrl)
     return this.openOverSsh()
   }
@@ -324,7 +436,7 @@ export class RemoteSshRuntime extends Service {
   }
 
   private async startEmbeddedAgentHost(codeServerPath: string, attempt: number): Promise<string> {
-    const instanceId = `${this.clientId}-${attempt}`
+    const instanceId = `${this.clientId}-${this.generation}-${attempt}`
     const child = spawn(this.config.sshExecutable, [
       ...this.config.sshArgs,
       '-T',
@@ -332,6 +444,13 @@ export class RemoteSshRuntime extends Service {
       buildEmbeddedAgentHostCommand(codeServerPath, instanceId),
     ], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
     this.embeddedAgentHost = child
+    // The remote Host is started through one SSH session: when that session
+    // ends, the Agent Host behind it is unreachable and the link is dead.
+    child.once('close', () => {
+      if (this.embeddedAgentHost !== child) return
+      this.embeddedAgentHost = undefined
+      this.markStale()
+    })
     let remotePort: number
     try {
       remotePort = await waitForAgentHostPort(child, this.config.startupTimeoutMs)
@@ -369,6 +488,13 @@ export class RemoteSshRuntime extends Service {
       this.config.sshTarget,
     ], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
     this.tunnel = tunnel
+    // A dropped forward means the websocket behind it is gone; record the link
+    // as dead so the next call reopens instead of reusing a closed client.
+    tunnel.once('close', () => {
+      if (this.tunnel !== tunnel) return
+      this.tunnel = undefined
+      this.markStale()
+    })
     await waitForPort(localPort, tunnel, 15_000)
     return `ws://127.0.0.1:${localPort}?tkn=${encodeURIComponent(token)}`
   }
