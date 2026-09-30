@@ -146,7 +146,7 @@
     }
   },
   "dependencies": {
-    "@microsoft/agent-host-protocol": "0.7.0"
+    "@microsoft/agent-host-protocol": "0.9.0"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.4",
@@ -179,7 +179,7 @@
     "@deepseek-ai/dsh-shell": "0.2.0-rc.1",
     "@deepseek-ai/dsh-system-prompt": "0.2.0-rc.1",
     "@deepseek-ai/dsh-tools": "0.2.0-rc.1",
-    "@deepseek-ai/schemastery": "3.18.1",
+    "@deepseek-ai/schemastery": "3.18.4",
     "@types/node": "^22.20.0",
     "@types/react": "~18.3.1",
     "@types/js-yaml": "^4.0.9",
