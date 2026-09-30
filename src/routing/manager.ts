@@ -40,23 +40,6 @@ export interface RemoteSshWorkspace {
 /** Host-side policy for file links produced inside a remote Session. */
 export type RemoteOpenFileMode = 'auto' | 'vscode' | 'cursor' | 'windsurf' | 'vscodium' | 'custom' | 'download'
 
-/** Multi-host transparent routing configuration. */
-export interface Config {
-  aliasRoot?: string
-  /** Absolute OpenSSH config path. Empty uses the platform user and system defaults. */
-  sshConfigFile?: string
-  servers?: RemoteSshServer[]
-  workspaces?: RemoteSshWorkspace[]
-  /** Prefer a VS Code-compatible Remote SSH editor; download is the fallback. */
-  openFileMode?: RemoteOpenFileMode
-  /** Absolute executable path used when openFileMode is custom. */
-  openFileEditorPath?: string
-  /** Maximum size of one downloaded fallback snapshot. */
-  openFileDownloadMaxBytes?: number
-  startupTimeoutMs?: number
-  requestTimeoutMs?: number
-}
-
 interface ResolvedConfig {
   aliasRoot: string
   sshConfigFile?: string
@@ -141,6 +124,44 @@ const workspaceSchema: z<RemoteSshWorkspace> = z.object({
   title: z.string(),
 })
 
+/** Shared protocol tag that marks a schema field the Loader resolves to a live reference. */
+const VOLATILE_WRITE = Symbol.for('cosmokit.volatile.write')
+
+/**
+ * Read one resolved config member.
+ *
+ * A volatile schema field resolves to a live reference whose `get()` hands back
+ * an immutable snapshot, while an ordinary field arrives as a plain value; both
+ * must reach the detached snapshot below as detached plain data.
+ */
+function readLive<T>(value: unknown): T {
+  if (typeof value !== 'object' || value === null || !(VOLATILE_WRITE in value)) return value as T
+  return (value as unknown as { get(): T }).get()
+}
+
+/**
+ * Materialize the composed config into plain values.
+ *
+ * The settings-facing fields are declared volatile, and the Loader resolves
+ * those to references whose value it updates in place instead of remounting this
+ * service. Every consumer below therefore works on a detached plain snapshot.
+ */
+function resolveLiveConfig(config: Config): ResolvedConfig {
+  const sshConfigFile = readLive<string | undefined>(config.sshConfigFile)
+  const openFileEditorPath = readLive<string | undefined>(config.openFileEditorPath)
+  return {
+    aliasRoot: config.aliasRoot,
+    ...(sshConfigFile === undefined ? {} : { sshConfigFile }),
+    servers: readLive<RemoteSshServer[]>(config.servers),
+    workspaces: readLive<RemoteSshWorkspace[]>(config.workspaces),
+    openFileMode: readLive<RemoteOpenFileMode>(config.openFileMode),
+    ...(openFileEditorPath === undefined ? {} : { openFileEditorPath }),
+    openFileDownloadMaxBytes: config.openFileDownloadMaxBytes,
+    startupTimeoutMs: config.startupTimeoutMs,
+    requestTimeoutMs: config.requestTimeoutMs,
+  }
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     remoteSshManager: RemoteSshManager
@@ -152,20 +173,43 @@ declare module '@deepseek-ai/cordis' {
  * An alias that was once remote remains a remote tombstone after removal, so
  * stale sessions fail closed instead of silently running on the local host.
  */
+/**
+ * Multi-host transparent routing configuration schema, and the single source of
+ * truth for {@link Config}.
+ *
+ * Everything this service persists at runtime must be declared volatile:
+ * SettingsForms accepts writes only to schema-declared live fields, and a
+ * volatile node has to sit on a fixed object path, so the catalog arrays are
+ * marked whole instead of per member. Composition-only knobs stay ordinary.
+ */
+const managerConfig = z.object({
+  /** Local identity root holding one directory per remote workspace alias. */
+  aliasRoot: z.string().default(resolve(process.env.DSH_HOME ?? resolve(process.env.USERPROFILE ?? '.', '.dsh'), 'remote-ssh', 'workspaces')),
+  /** Absolute OpenSSH config path. Empty uses the platform user and system defaults. */
+  sshConfigFile: z.string().volatile(),
+  servers: z.array(serverSchema).default([]).volatile(),
+  workspaces: z.array(workspaceSchema).default([]).volatile(),
+  /** Prefer a VS Code-compatible Remote SSH editor; download is the fallback. */
+  openFileMode: z.union(['auto', 'vscode', 'cursor', 'windsurf', 'vscodium', 'custom', 'download'] as const).default('auto').volatile(),
+  /** Absolute executable path used when openFileMode is custom. */
+  openFileEditorPath: z.string().volatile(),
+  /** Maximum size of one downloaded fallback snapshot. */
+  openFileDownloadMaxBytes: z.number().default(64 * 1024 * 1024),
+  startupTimeoutMs: z.number().default(600_000),
+  requestTimeoutMs: z.number().default(30_000),
+})
+
+/**
+ * Composed configuration as the Loader resolves it: the volatile fields above
+ * arrive as live references rather than plain values, and {@link resolveLiveConfig}
+ * detaches them into the plain {@link ResolvedConfig} snapshot consumers use.
+ */
+export type Config = Schemastery.TypeT<typeof managerConfig>
+
 export class RemoteSshManager extends Service {
   static inject = ['settings']
 
-  static Config: z<Config> = z.object({
-    aliasRoot: z.string().default(resolve(process.env.DSH_HOME ?? resolve(process.env.USERPROFILE ?? '.', '.dsh'), 'remote-ssh', 'workspaces')),
-    sshConfigFile: z.string(),
-    servers: z.array(serverSchema).default([]),
-    workspaces: z.array(workspaceSchema).default([]),
-    openFileMode: z.union(['auto', 'vscode', 'cursor', 'windsurf', 'vscodium', 'custom', 'download'] as const).default('auto'),
-    openFileEditorPath: z.string(),
-    openFileDownloadMaxBytes: z.number().default(64 * 1024 * 1024),
-    startupTimeoutMs: z.number().default(600_000),
-    requestTimeoutMs: z.number().default(30_000),
-  })
+  static Config = managerConfig
 
   private readonly entry: ResolvedConfig
   private current: ResolvedConfig
@@ -188,7 +232,7 @@ export class RemoteSshManager extends Service {
 
   constructor(ctx: Context, config: Config) {
     super(ctx, 'remoteSshManager')
-    this.entry = config as ResolvedConfig
+    this.entry = resolveLiveConfig(config)
     this.current = this.entry
     this.entryId = ctx.fiber.entry?.options.id
     this.validate(this.entry)
@@ -674,13 +718,25 @@ export class RemoteSshManager extends Service {
   }
 
   /**
-   * Write the next catalog through SettingsForms into this plugin's own
-   * profile entry, then apply it in this instance immediately; the Loader's
-   * ordinary config update rebuilds this plugin with the same values.
+   * Write the live section through SettingsForms into this plugin's own profile
+   * entry, then apply it in this instance immediately.
+   *
+   * `replace` takes the complete set of *volatile* form values, not the whole
+   * config: dsh-settings validates every supplied key against the volatile
+   * schema and rejects ordinary fields such as aliasRoot or the timeout knobs.
+   * Unset preferences are omitted rather than sent as empty strings, so clearing
+   * one resets the live layer to the composition value instead of persisting a
+   * value that `validate` would refuse on the next start.
    */
   private async replaceSettings(next: ResolvedConfig): Promise<void> {
     if (this.entryId === undefined) throw new Error('dsh-remote-ssh: settings write requires a profile entry')
-    await this.ctx.settings.replace(this.entryId, next as unknown as object)
+    await this.ctx.settings.replace(this.entryId, {
+      servers: next.servers,
+      workspaces: next.workspaces,
+      openFileMode: next.openFileMode,
+      ...(next.sshConfigFile === undefined ? {} : { sshConfigFile: next.sshConfigFile }),
+      ...(next.openFileEditorPath === undefined ? {} : { openFileEditorPath: next.openFileEditorPath }),
+    } as unknown as object)
     await this.queueRefresh(next)
   }
 
