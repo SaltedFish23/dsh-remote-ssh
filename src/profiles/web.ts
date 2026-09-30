@@ -8,6 +8,8 @@ import { openRemoteFile } from '../ssh/open-file.ts'
 import { appendSshHost, defaultSshConfigFiles, discoverSshConfigHosts } from '../ssh/config.ts'
 
 export const REMOTE_SSH_STATE_PATH = '/plugins/dsh-remote-ssh/state'
+export const REMOTE_SSH_LINK_STATE_PATH = '/plugins/dsh-remote-ssh/link-state'
+export const REMOTE_SSH_LINK_STATE_STREAM_PATH = '/plugins/dsh-remote-ssh/link-state/stream'
 export const REMOTE_SSH_SERVER_PATH = '/plugins/dsh-remote-ssh/server'
 export const REMOTE_SSH_SERVER_REMOVE_PATH = '/plugins/dsh-remote-ssh/server/remove'
 export const REMOTE_SSH_WORKSPACE_PATH = '/plugins/dsh-remote-ssh/workspace'
@@ -29,9 +31,34 @@ export function apply(ctx: Context): void {
 
 /** Register same-origin catalog mutation and connection-probe endpoints. */
 function registerWebRoutes(ctx: Context): void {
+  /** Long-lived link-state streams, ended when these routes are torn down. */
+  const linkStreams = new Set<ServerResponse>()
   const routes = [
     route(ctx, REMOTE_SSH_STATE_PATH, 'GET', async (_req, res) => {
       json(res, 200, await catalogState(ctx.remoteSshManager))
+    }),
+    route(ctx, REMOTE_SSH_LINK_STATE_PATH, 'GET', async (_req, res) => {
+      json(res, 200, { workspaces: ctx.remoteSshManager.workspaceLinkStates() })
+    }),
+    route(ctx, REMOTE_SSH_LINK_STATE_STREAM_PATH, 'GET', async (_req, res) => {
+      res.writeHead(200, {
+        'content-type': 'application/x-ndjson; charset=utf-8',
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
+      })
+      const send = (): void => {
+        if (res.writableEnded) return
+        res.write(`${JSON.stringify({ workspaces: ctx.remoteSshManager.workspaceLinkStates() })}\n`)
+      }
+      const detach = ctx.remoteSshManager.onLinkStateChange(send)
+      linkStreams.add(res)
+      send()
+      try {
+        await new Promise<void>(resolvePromise => { res.once('close', resolvePromise) })
+      } finally {
+        detach()
+        linkStreams.delete(res)
+      }
     }),
     route(ctx, REMOTE_SSH_SETTINGS_PATH, 'POST', async (req, res) => {
       const body = await readJson(req)
@@ -94,7 +121,11 @@ function registerWebRoutes(ctx: Context): void {
       json(res, 201, await appendSshHost(configPath, requiredString(body, 'command')))
     }),
   ]
-  ctx.effect(() => () => { for (const dispose of routes) dispose() }, 'Remote SSH Web routes')
+  ctx.effect(() => () => {
+    for (const dispose of routes) dispose()
+    for (const stream of linkStreams) if (!stream.writableEnded) stream.end()
+    linkStreams.clear()
+  }, 'Remote SSH Web routes')
 }
 
 interface AvailableServer extends RemoteSshServer {

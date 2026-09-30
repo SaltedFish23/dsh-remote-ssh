@@ -78,6 +78,12 @@ export const en = {
   selectLocalFolder: "Select local folder",
   selectRemoteSsh: "Select Remote SSH",
   remotePathPlaceholder: "Absolute remote path, for example /srv/project",
+  linkStateConnecting: "Connecting…",
+  linkStateConnected: "Connected",
+  linkStateReconnecting: "Reconnecting…",
+  linkStateFailed: "Connection failed",
+  linkStateDisposed: "Disconnected",
+  linkStateIdle: "Not connected",
 };
 
 /** Keys shared by both dictionaries. */
@@ -162,4 +168,10 @@ export const zh: { [Key in RemoteSshLocaleKey]: string } = {
   selectLocalFolder: "选择本机文件夹",
   selectRemoteSsh: "选择 Remote SSH",
   remotePathPlaceholder: "远端绝对路径，例如 /srv/project",
+  linkStateConnecting: "正在连接…",
+  linkStateConnected: "已连接",
+  linkStateReconnecting: "正在重连…",
+  linkStateFailed: "连接失败",
+  linkStateDisposed: "已断开",
+  linkStateIdle: "未连接",
 };

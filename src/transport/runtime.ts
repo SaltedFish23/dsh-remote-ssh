@@ -284,6 +284,11 @@ export class RemoteSshRuntime extends Service {
     return this.linkState
   }
 
+  /** Cause of the latest failure, when the current state carries one. */
+  get error(): string | undefined {
+    return this.linkError
+  }
+
   /**
    * Subscribe to link state transitions. The current state is not replayed;
    * poll {@link state} after subscribing. Listener errors are swallowed so a

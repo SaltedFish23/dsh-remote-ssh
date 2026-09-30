@@ -14,6 +14,7 @@ import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
 import z from '@deepseek-ai/schemastery'
 import RemoteSshFileSystem from '../transport/fs.ts'
 import RemoteSshRuntime, { fileUriFromPosixPath, posixPathFromFileUri, WorkspacePathMapper } from '../transport/runtime.ts'
+import type { RemoteSshLinkState } from '../transport/runtime.ts'
 import RemoteSshShellExecutor from '../transport/shell.ts'
 
 /** One SSH destination visible in Settings and workspace selection. */
@@ -39,6 +40,23 @@ export interface RemoteSshWorkspace {
 
 /** Host-side policy for file links produced inside a remote Session. */
 export type RemoteOpenFileMode = 'auto' | 'vscode' | 'cursor' | 'windsurf' | 'vscodium' | 'custom' | 'download'
+
+/**
+ * Sidebar-facing link state for one remote workspace row. `idle` means the
+ * server has no live host runtime in this process — nothing has connected
+ * yet — which renders as the gray "not connected" dot.
+ */
+export interface RemoteSshWorkspaceLink {
+  workspaceId: string
+  serverId: string
+  serverLabel: string
+  aliasPath: string
+  state: RemoteSshLinkState | 'idle'
+  error?: string
+}
+
+/** Called after {@link RemoteSshManager.workspaceLinkStates} changes. */
+export type RemoteSshLinkChangeListener = () => void
 
 interface ResolvedConfig {
   aliasRoot: string
@@ -78,6 +96,8 @@ interface RemoteHostContext {
   key: string
   server: RemoteSshServer
   transport: RemoteSshTransport
+  /** Releases the runtime state subscription installed by attachLinkState. */
+  detachLinkState?: () => void
 }
 
 interface RemoteWorkspaceShellContext {
@@ -229,6 +249,11 @@ export class RemoteSshManager extends Service {
   private workspaceRegistry: WorkspaceRegistry | undefined
   private refreshTail: Promise<void> = Promise.resolve()
   private readonly initialRefresh: Promise<void>
+  /** Last pushed link state per server id; absent means no live runtime. */
+  private readonly linkStates = new Map<string, { state: RemoteSshLinkState; error?: string }>()
+  private readonly linkListeners = new Set<RemoteSshLinkChangeListener>()
+  /** Serialized last-fanned-out link snapshot, for no-op suppression. */
+  private linkSignature = ''
 
   constructor(ctx: Context, config: Config) {
     super(ctx, 'remoteSshManager')
@@ -268,6 +293,64 @@ export class RemoteSshManager extends Service {
   /** Current detached catalog snapshot. */
   snapshot(): ResolvedConfig {
     return structuredClone(this.current)
+  }
+
+  /**
+   * Link state per configured remote workspace, keyed for the sidebar's
+   * workspace rows. A workspace whose server has no live host runtime reads
+   * as `idle` — the gray "not connected in this process" dot.
+   */
+  workspaceLinkStates(): RemoteSshWorkspaceLink[] {
+    const links: RemoteSshWorkspaceLink[] = []
+    for (const route of this.routeByWorkspaceId.values()) {
+      const link = this.linkStates.get(route.server.id)
+      links.push({
+        workspaceId: route.workspace.id,
+        serverId: route.server.id,
+        serverLabel: route.server.label,
+        aliasPath: route.aliasPath,
+        state: link?.state ?? 'idle',
+        ...(link?.error === undefined ? {} : { error: link.error }),
+      })
+    }
+    return links
+  }
+
+  /**
+   * Subscribe to workspace link-state changes. The current snapshot is not
+   * replayed; poll {@link workspaceLinkStates} after subscribing. Listener
+   * errors are swallowed so a broken consumer cannot affect routing.
+   */
+  onLinkStateChange(listener: RemoteSshLinkChangeListener): () => void {
+    this.linkListeners.add(listener)
+    return () => { this.linkListeners.delete(listener) }
+  }
+
+  /** Fan a possible link-state change out, skipping no-op snapshots. */
+  private publishLinkStates(): void {
+    const signature = JSON.stringify(this.workspaceLinkStates())
+    if (signature === this.linkSignature) return
+    this.linkSignature = signature
+    for (const listener of [...this.linkListeners]) {
+      try { listener() } catch { /* a broken consumer must not affect routing */ }
+    }
+  }
+
+  /**
+   * Mirror one accepted host runtime into the per-server link-state map. Runs
+   * once per host context; the subscription is released by disposeHost.
+   * Runtimes predating the pushed state machine (and test doubles) expose no
+   * subscription surface, and their workspaces keep reading as `idle`.
+   */
+  private attachLinkState(server: RemoteSshServer, host: RemoteHostContext): void {
+    if (host.detachLinkState !== undefined) return
+    if (typeof host.remote.onStateChange !== 'function') return
+    const update = (state: RemoteSshLinkState, error?: string): void => {
+      this.linkStates.set(server.id, { state, ...(error === undefined ? {} : { error }) })
+      this.publishLinkStates()
+    }
+    host.detachLinkState = host.remote.onStateChange(event => { update(event.state, event.error) })
+    update(host.remote.state, host.remote.error)
   }
 
   /** Select one custom OpenSSH config, or restore the platform defaults. */
@@ -580,6 +663,9 @@ export class RemoteSshManager extends Service {
     for (const [key, value] of nextById) this.routeByWorkspaceId.set(key, value)
     this.current = structuredClone(config)
     await this.registerAllWorkspaces()
+    // The workspace route set changed; derived link rows may have appeared or
+    // disappeared even when no runtime state moved.
+    this.publishLinkStates()
   }
 
   private async registerAllWorkspaces(): Promise<void> {
@@ -669,7 +755,10 @@ export class RemoteSshManager extends Service {
       if (this.hosts.get(server.id) !== pending) continue
       // Only a definite `false` proves the link is gone; a runtime that does
       // not report its state keeps the previous reuse behavior.
-      if (host.remote.connected !== false || attempt >= 1) return host
+      if (host.remote.connected !== false || attempt >= 1) {
+        this.attachLinkState(server, host)
+        return host
+      }
       await this.disposeHost(host).catch(() => {})
       this.hosts.delete(server.id)
     }
@@ -732,6 +821,9 @@ export class RemoteSshManager extends Service {
   }
 
   private async disposeHost(host: RemoteHostContext): Promise<void> {
+    host.detachLinkState?.()
+    this.linkStates.delete(host.server.id)
+    this.publishLinkStates()
     await host.ctx.fiber.dispose()
     if (!host.transport.multiplexed) return
     await closeControlMaster(host.transport, host.server.sshTarget)

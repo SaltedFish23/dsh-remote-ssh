@@ -388,3 +388,93 @@ describe('RemoteSshManager', () => {
     }
   })
 })
+
+describe('RemoteSshManager link states', () => {
+  it('aggregates per-server link states for workspace rows', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-remote-ssh-manager-'))
+    const ctx = await createContext()
+    try {
+      await ctx.plugin(RemoteSshManager, {
+        aliasRoot: root,
+        servers: [{ id: 'devbox', label: 'Devbox', sshTarget: 'test-devbox' }],
+        workspaces: [
+          { id: 'project-a', serverId: 'devbox', remotePath: '/srv/project-a' },
+          { id: 'project-b', serverId: 'devbox', remotePath: '/srv/project-b' },
+        ],
+      })
+      const manager = ctx.remoteSshManager
+
+      // No runtime has been accepted yet: every remote workspace reads idle.
+      expect(manager.workspaceLinkStates().map(link => link.state)).toEqual(['idle', 'idle'])
+      expect(manager.workspaceLinkStates()[0]).toMatchObject({
+        workspaceId: 'project-a',
+        serverId: 'devbox',
+        serverLabel: 'Devbox',
+        aliasPath: resolve(root, 'project-a'),
+      })
+
+      // A controllable stand-in runtime with the pushed state-machine surface.
+      const listeners = new Set<(event: { state: string; error?: string }) => void>()
+      const remote = {
+        connected: true,
+        state: 'connecting',
+        error: undefined as string | undefined,
+        onStateChange(listener: (event: { state: string; error?: string }) => void) {
+          listeners.add(listener)
+          return () => { listeners.delete(listener) }
+        },
+        publish(state: string, error?: string) {
+          this.state = state
+          this.error = error
+          for (const listener of [...listeners]) listener(error === undefined ? { state } : { state, error })
+        },
+      }
+      ;(manager as unknown as { createHostContext(server: unknown): Promise<unknown> }).createHostContext = async server => ({
+        ctx: new Context(),
+        remote,
+        key: JSON.stringify(['test-devbox', [], 'code', null]),
+        server,
+        transport: { executable: 'ssh', args: [], multiplexed: false },
+      })
+
+      const notifications: string[] = []
+      const detach = manager.onLinkStateChange(() => {
+        notifications.push(JSON.stringify(manager.workspaceLinkStates()))
+      })
+
+      // Accepting the host seeds the map from the runtime's current state;
+      // both workspaces on that server share it.
+      await manager.workspaceContext(manager.workspace('project-a'))
+      expect(manager.workspaceLinkStates().map(link => link.state)).toEqual(['connecting', 'connecting'])
+      expect(listeners.size).toBe(1)
+      expect(notifications.length).toBe(1)
+
+      // Pushed transitions fan out to every workspace row of that server.
+      remote.publish('connected')
+      expect(manager.workspaceLinkStates().map(link => link.state)).toEqual(['connected', 'connected'])
+      remote.publish('reconnecting', 'heartbeat timed out')
+      const degraded = manager.workspaceLinkStates()
+      expect(degraded.map(link => link.state)).toEqual(['reconnecting', 'reconnecting'])
+      expect(degraded[0]).toMatchObject({ error: 'heartbeat timed out' })
+      expect(notifications.length).toBe(3)
+
+      // A duplicate snapshot is a no-op and does not re-notify.
+      remote.publish('reconnecting', 'heartbeat timed out')
+      expect(notifications.length).toBe(3)
+
+      // Removing a workspace republishes the route set without its row.
+      await manager.removeWorkspace('project-a')
+      expect(manager.workspaceLinkStates().map(link => link.workspaceId)).toEqual(['project-b'])
+
+      // Disposing the host drops the state; the remaining row falls back to
+      // idle and the runtime subscription is released.
+      await ctx.fiber.dispose()
+      expect(listeners.size).toBe(0)
+      expect(manager.workspaceLinkStates().map(link => link.state)).toEqual(['idle'])
+      detach()
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})

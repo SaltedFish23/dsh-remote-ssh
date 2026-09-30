@@ -1,4 +1,6 @@
 export const STATE_PATH = '/plugins/dsh-remote-ssh/state'
+export const LINK_STATE_PATH = '/plugins/dsh-remote-ssh/link-state'
+export const LINK_STATE_STREAM_PATH = '/plugins/dsh-remote-ssh/link-state/stream'
 export const WORKSPACE_PATH = '/plugins/dsh-remote-ssh/workspace'
 export const WORKSPACE_REMOVE_PATH = '/plugins/dsh-remote-ssh/workspace/remove'
 export const LOCAL_WORKSPACE_PATH = '/plugins/dsh-remote-ssh/local-workspace'
@@ -54,6 +56,23 @@ export interface CatalogState {
   openFileEditorPath?: string
 }
 
+/** Transparent-plane link states; `idle` means never connected this process. */
+export type LinkStateName = 'connecting' | 'connected' | 'reconnecting' | 'failed' | 'disposed' | 'idle'
+
+/** Sidebar-facing link state for one remote workspace row. */
+export interface WorkspaceLinkState {
+  workspaceId: string
+  serverId: string
+  serverLabel: string
+  aliasPath: string
+  state: LinkStateName
+  error?: string
+}
+
+export interface LinkStateSnapshot {
+  workspaces: WorkspaceLinkState[]
+}
+
 export const emptyCatalog: CatalogState = {
   servers: [],
   workspaces: [],
@@ -95,6 +114,24 @@ export async function* requestStream<T>(path: string, body: unknown): AsyncGener
     body: JSON.stringify(body),
   })
   if (!response.ok || response.body === null) throw new Error(`HTTP ${response.status}`)
+  yield* readNdjson<T>(response)
+}
+
+/** Follow a long-lived GET route pushing newline-delimited snapshots. */
+export async function* requestGetStream<T>(path: string, signal?: AbortSignal): AsyncGenerator<T> {
+  const response = await fetch(path, {
+    credentials: 'same-origin',
+    cache: 'no-store',
+    headers: { accept: 'application/x-ndjson' },
+    ...(signal === undefined ? {} : { signal }),
+  })
+  if (!response.ok || response.body === null) throw new Error(`HTTP ${response.status}`)
+  yield* readNdjson<T>(response)
+}
+
+/** Decode one JSON value per line until the stream ends or is cancelled. */
+async function* readNdjson<T>(response: Response): AsyncGenerator<T> {
+  if (response.body === null) return
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
