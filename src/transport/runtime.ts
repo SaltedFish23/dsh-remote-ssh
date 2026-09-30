@@ -99,6 +99,13 @@ export const SSH_KEEPALIVE_ARGS: readonly string[] = [
   '-o', 'ServerAliveCountMax=3',
 ]
 
+/**
+ * Upper bound for one remote reap session. A reachable host reaps in well
+ * under a second; the bound only keeps a black-holed path from stacking
+ * zombie kill sessions across reconnect cycles.
+ */
+const EMBEDDED_REAP_TIMEOUT_MS = 10_000
+
 /** Args of one short-lived `ssh -T` command session: startup, probes, token reads. */
 export function buildSshCommandArgs(
   sshArgs: readonly string[],
@@ -117,8 +124,22 @@ export function buildEmbeddedAgentHostCommand(codeServerPath?: string, instanceI
   return [
     resolveCodeServer,
     'if [ -z "$dsh_code_server" ]; then printf \'dsh-remote-ssh: no usable code agent host or VS Code Server code-server found\\n\' >&2; exit 127; fi',
-    `exec "$dsh_code_server" --host 127.0.0.1 --port 0 --agent-host-port 0 --accept-server-license-terms --server-data-dir "$HOME/.dsh-remote-ssh/server-embedded/${instanceId}" --log info`,
+    `exec "$dsh_code_server" --host 127.0.0.1 --port 0 --agent-host-port 0 --accept-server-license-terms --enable-remote-auto-shutdown --server-data-dir "$HOME/.dsh-remote-ssh/server-embedded/${instanceId}" --log info`,
   ].join('\n')
+}
+
+/**
+ * Build the one-shot command that terminates one embedded Agent Host
+ * instance on the remote side. The pattern matches the instance's unique
+ * data directory, so no other session (another DSH instance, a concurrent
+ * reconnect generation) can be hit. The bracketed first character keeps the
+ * ERE from matching this kill command's own command line, which would
+ * otherwise terminate the very SSH session running it.
+ */
+export function buildReapEmbeddedAgentHostCommand(instanceId: string): string {
+  if (!/^[a-zA-Z0-9._-]+$/.test(instanceId)) throw new Error(`invalid embedded Agent Host instance id: ${instanceId}`)
+  const pattern = `[s]erver-embedded/${instanceId.replaceAll('.', '\\.')}`
+  return `pkill -f -- ${quotePosix(pattern)}`
 }
 
 export function fileUriFromPosixPath(path: string): string {
@@ -215,6 +236,13 @@ export class RemoteSshRuntime extends Service {
   private connection: Promise<AhpConnection> | undefined
   private tunnel: ChildProcessWithoutNullStreams | undefined
   private embeddedAgentHost: ChildProcessWithoutNullStreams | undefined
+  /**
+   * Remote instance id of {@link embeddedAgentHost}. The remote server
+   * survives the death of the SSH session that spawned it (it ignores the
+   * hangup and is re-parented to init), so this id is what allows every
+   * teardown path to terminate the instance instead of leaking it.
+   */
+  private embeddedInstanceId: string | undefined
   /** Client of the settled {@link connection}, used to judge liveness. */
   private live: AhpClient | undefined
   /** Set once the current connection is known dead and must be reopened. */
@@ -263,7 +291,10 @@ export class RemoteSshRuntime extends Service {
         // A failed startup owns its original diagnostic.
       } finally {
         this.tunnel?.kill()
-        this.embeddedAgentHost?.kill()
+        this.tunnel = undefined
+        // Awaited so a reachable remote is reaped before the process exits;
+        // the reap itself swallows its own errors and is time-bounded.
+        await this.discardEmbeddedAgentHost()
       }
     }, 'Remote SSH AHP teardown')
   }
@@ -388,8 +419,39 @@ export class RemoteSshRuntime extends Service {
     void pending?.catch(() => {})
     this.tunnel?.kill()
     this.tunnel = undefined
-    this.embeddedAgentHost?.kill()
+    void this.discardEmbeddedAgentHost()
+  }
+
+  /**
+   * Drop the embedded Agent Host of the current attempt: kill the local SSH
+   * session behind it and, best effort, terminate the remote instance it
+   * started. Returns the in-flight reap when one was started. Every path
+   * that abandons an embedded attempt must go through here, or the remote
+   * server leaks (it outlives the SSH session that spawned it).
+   */
+  private discardEmbeddedAgentHost(): Promise<void> | undefined {
+    const child = this.embeddedAgentHost
+    const instanceId = this.embeddedInstanceId
     this.embeddedAgentHost = undefined
+    this.embeddedInstanceId = undefined
+    child?.kill()
+    if (instanceId === undefined) return undefined
+    return this.reapEmbeddedAgentHost(instanceId)
+  }
+
+  /**
+   * Terminate one remote embedded Agent Host instance through a dedicated
+   * one-shot SSH session. Best effort by design: this usually runs right
+   * after the link died, and a host that cannot be reached now would
+   * otherwise leak permanently. Overridable so tests can observe reaps
+   * without spawning SSH.
+   */
+  protected reapEmbeddedAgentHost(instanceId: string): Promise<void> {
+    return runCaptured(
+      this.config.sshExecutable,
+      buildSshCommandArgs(this.config.sshArgs, this.config.sshTarget, buildReapEmbeddedAgentHostCommand(instanceId)),
+      Math.min(this.config.startupTimeoutMs, EMBEDDED_REAP_TIMEOUT_MS),
+    ).then(() => undefined, () => undefined)
   }
 
   /**
@@ -650,8 +712,11 @@ export class RemoteSshRuntime extends Service {
       buildEmbeddedAgentHostCommand(codeServerPath, instanceId),
     ), { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
     this.embeddedAgentHost = child
+    this.embeddedInstanceId = instanceId
     // The remote Host is started through one SSH session: when that session
     // ends, the Agent Host behind it is unreachable and the link is dead.
+    // The instance id deliberately survives this handler so the retirement
+    // below can still reap the orphaned remote server.
     child.once('close', () => {
       if (this.embeddedAgentHost !== child) return
       this.embeddedAgentHost = undefined
@@ -661,7 +726,7 @@ export class RemoteSshRuntime extends Service {
     try {
       remotePort = await waitForAgentHostPort(child, this.config.startupTimeoutMs)
     } catch (error: unknown) {
-      child.kill()
+      void this.discardEmbeddedAgentHost()
       throw error
     }
     const tokenResult = await runCaptured(
@@ -675,7 +740,7 @@ export class RemoteSshRuntime extends Service {
     )
     const token = tokenResult.stdout.trim()
     if (tokenResult.exitCode !== 0 || token.length === 0 || /\s/.test(token)) {
-      child.kill()
+      void this.discardEmbeddedAgentHost()
       throw new Error(`dsh-remote-ssh: could not read the embedded Agent Host connection token\n${tokenResult.stderr}`)
     }
     return this.openTunnel(remotePort, token)
@@ -709,8 +774,7 @@ export class RemoteSshRuntime extends Service {
   private resetSshAttempt(): void {
     this.tunnel?.kill()
     this.tunnel = undefined
-    this.embeddedAgentHost?.kill()
-    this.embeddedAgentHost = undefined
+    void this.discardEmbeddedAgentHost()
   }
 }
 

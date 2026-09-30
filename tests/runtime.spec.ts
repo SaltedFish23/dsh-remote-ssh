@@ -3,6 +3,8 @@ import { ClientClosedError, TransportError, type ConnectionState } from '@micros
 import { Context } from '@deepseek-ai/cordis'
 import RemoteSshRuntime, {
   SSH_KEEPALIVE_ARGS,
+  buildEmbeddedAgentHostCommand,
+  buildReapEmbeddedAgentHostCommand,
   buildSshCommandArgs,
   type AhpConnection,
   type RemoteSshLinkEvent,
@@ -60,6 +62,29 @@ class FakeClient {
 /** A client whose local state view never reports the closure itself. */
 class OpaqueClient extends FakeClient {
   override get connectionState(): ConnectionState { return { status: 'connected' } }
+}
+
+/**
+ * Records remote reaps instead of opening SSH kill sessions. Tests plant the
+ * private instance id the way {@link RemoteSshRuntime}'s embedded bootstrap
+ * would, then observe which teardown path reaped it.
+ */
+class ReapRecordingRuntime extends RemoteSshRuntime {
+  readonly reaped: string[] = []
+
+  protected override async open(): Promise<AhpConnection> {
+    if (openFactory === undefined) throw new Error('test runtime has no open factory')
+    return openFactory()
+  }
+
+  protected override reapEmbeddedAgentHost(instanceId: string): Promise<void> {
+    this.reaped.push(instanceId)
+    return Promise.resolve()
+  }
+}
+
+function plantEmbeddedInstance(runtime: RemoteSshRuntime, instanceId: string): void {
+  (runtime as unknown as { embeddedInstanceId: string | undefined }).embeddedInstanceId = instanceId
 }
 
 let openFactory: (() => AhpConnection) | undefined
@@ -728,6 +753,103 @@ describe('RemoteSshRuntime heartbeat', () => {
   })
 })
 
+describe('RemoteSshRuntime embedded host reaping', () => {
+  it('reaps the remote embedded instance when a dead link is retired', async () => {
+    const ctx = new Context()
+    const clients: FakeClient[] = []
+    openFactory = () => trackClients(clients)
+    try {
+      await ctx.plugin(ReapRecordingRuntime, { sshTarget: 'test-host' })
+      const runtime = ctx.remoteSsh as ReapRecordingRuntime
+      await runtime.getConnection()
+
+      plantEmbeddedInstance(runtime, 'dsh-remote-ssh-demo-1-0')
+      clients[0]!.close()
+      await flushBackground()
+
+      // The background recovery retires the dead attempt before opening the
+      // replacement; the retirement must have reaped its remote instance.
+      expect(runtime.reaped).toEqual(['dsh-remote-ssh-demo-1-0'])
+      expect(clients).toHaveLength(2)
+    } finally {
+      openFactory = undefined
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('reaps the remote embedded instance when the runtime is disposed', async () => {
+    const ctx = new Context()
+    const clients: FakeClient[] = []
+    openFactory = () => trackClients(clients)
+    await ctx.plugin(ReapRecordingRuntime, { sshTarget: 'test-host' })
+    const runtime = ctx.remoteSsh as ReapRecordingRuntime
+    await runtime.getConnection()
+    plantEmbeddedInstance(runtime, 'dsh-remote-ssh-demo-1-0')
+
+    await ctx.fiber.dispose()
+    openFactory = undefined
+
+    expect(runtime.reaped).toEqual(['dsh-remote-ssh-demo-1-0'])
+  })
+
+  it('reaps the remote embedded instance when a consumer invalidates the link', async () => {
+    const ctx = new Context()
+    const clients: FakeClient[] = []
+    openFactory = () => trackClients(clients)
+    try {
+      await ctx.plugin(ReapRecordingRuntime, { sshTarget: 'test-host' })
+      const runtime = ctx.remoteSsh as ReapRecordingRuntime
+      await runtime.getConnection()
+      plantEmbeddedInstance(runtime, 'dsh-remote-ssh-demo-2-0')
+
+      runtime.invalidateConnection()
+      expect(runtime.reaped).toEqual(['dsh-remote-ssh-demo-2-0'])
+    } finally {
+      openFactory = undefined
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('reaps an instance exactly once across overlapping teardowns', async () => {
+    const ctx = new Context()
+    const clients: FakeClient[] = []
+    openFactory = () => trackClients(clients)
+    try {
+      await ctx.plugin(ReapRecordingRuntime, { sshTarget: 'test-host' })
+      const runtime = ctx.remoteSsh as ReapRecordingRuntime
+      await runtime.getConnection()
+      plantEmbeddedInstance(runtime, 'dsh-remote-ssh-demo-1-0')
+
+      clients[0]!.close()
+      await flushBackground()
+      // A second teardown (dispose after the recovery already retired the
+      // attempt) must not fire a duplicate kill session.
+      await ctx.fiber.dispose()
+      expect(runtime.reaped).toEqual(['dsh-remote-ssh-demo-1-0'])
+    } finally {
+      openFactory = undefined
+    }
+  })
+
+  it('never reaps when no embedded instance was started', async () => {
+    const ctx = new Context()
+    const clients: FakeClient[] = []
+    openFactory = () => trackClients(clients)
+    try {
+      await ctx.plugin(ReapRecordingRuntime, { sshTarget: 'test-host' })
+      const runtime = ctx.remoteSsh as ReapRecordingRuntime
+      await runtime.getConnection()
+
+      clients[0]!.close()
+      await flushBackground()
+      expect(runtime.reaped).toEqual([])
+    } finally {
+      openFactory = undefined
+      await ctx.fiber.dispose()
+    }
+  })
+})
+
 describe('SSH command args', () => {
   it('exposes keepalive options as well-formed -o pairs', () => {
     expect(SSH_KEEPALIVE_ARGS).toEqual([
@@ -756,5 +878,65 @@ describe('SSH command args', () => {
     expect(args.at(-2)).toBe('host')
     expect(args.at(-1)).toBe('true')
     expect(userArgs).toEqual(['-i', '~/.ssh/key', '-p', '2222'])
+  })
+})
+
+describe('embedded Agent Host reap command', () => {
+  const reapPattern = (command: string): RegExp =>
+    new RegExp(/'(.*)'$/u.exec(command)?.[1] ?? throwMissing())
+
+  function throwMissing(): never {
+    throw new Error('reap command does not end in a quoted pattern')
+  }
+
+  it('targets exactly the instance data directory', () => {
+    const instanceId = 'dsh-remote-ssh-0a1b2c3d-4e5f-6789-abcd-ef0123456789-3-1'
+    const command = buildReapEmbeddedAgentHostCommand(instanceId)
+    expect(command).toBe(`pkill -f -- '[s]erver-embedded/${instanceId}'`)
+
+    const pattern = reapPattern(command)
+    const target = `sh /vscode-server/bin/code-server --host 127.0.0.1 --port 0 --agent-host-port 0 --server-data-dir /home/u/.dsh-remote-ssh/server-embedded/${instanceId} --log info`
+    expect(pattern.test(target)).toBe(true)
+  })
+
+  it('cannot match the kill session running it', () => {
+    const instanceId = 'dsh-remote-ssh-0a1b2c3d-4e5f-6789-abcd-ef0123456789-3-1'
+    const command = buildReapEmbeddedAgentHostCommand(instanceId)
+    // What sshd actually runs remotely: the user's shell with -c.
+    const session = `bash -c ${command}`
+    expect(reapPattern(command).test(session)).toBe(false)
+  })
+
+  it('spares neighboring instances of the same runtime', () => {
+    const instanceId = 'dsh-remote-ssh-0a1b2c3d-4e5f-6789-abcd-ef0123456789-3-1'
+    const pattern = reapPattern(buildReapEmbeddedAgentHostCommand(instanceId))
+    const cmdline = (id: string): string =>
+      `node bootstrap-fork --server-data-dir /home/u/.dsh-remote-ssh/server-embedded/${id} --log info`
+
+    // Other generations, attempts, and client ids must all survive.
+    expect(pattern.test(cmdline('dsh-remote-ssh-0a1b2c3d-4e5f-6789-abcd-ef0123456789-3-0'))).toBe(false)
+    expect(pattern.test(cmdline('dsh-remote-ssh-0a1b2c3d-4e5f-6789-abcd-ef0123456789-4-1'))).toBe(false)
+    expect(pattern.test(cmdline('dsh-remote-ssh-ffffffff-1111-2222-3333-444455556666-3-1'))).toBe(false)
+    expect(pattern.test(cmdline('dsh-remote-ssh-0a1b2c3d-4e5f-6789-abcd-ef0123456789-31-1'))).toBe(false)
+  })
+
+  it('escapes regex metacharacters in the instance id', () => {
+    const pattern = reapPattern(buildReapEmbeddedAgentHostCommand('dsh.remote-1-0'))
+    expect(pattern.test('server-embedded/dshXremote-1-0')).toBe(false)
+    expect(pattern.test('server-embedded/dsh.remote-1-0')).toBe(true)
+  })
+
+  it('rejects instance ids outside the safe alphabet', () => {
+    expect(() => buildReapEmbeddedAgentHostCommand("'; rm -rf /; #")).toThrow(/invalid embedded Agent Host instance id/)
+    expect(() => buildReapEmbeddedAgentHostCommand('a b')).toThrow(/invalid embedded Agent Host instance id/)
+  })
+
+  it('arms the embedded bootstrap with the idle self-shutdown backstop', () => {
+    const command = buildEmbeddedAgentHostCommand('/vscode-server/bin/code-server', 'dsh-remote-ssh-demo-1-0')
+    // An initialized AHP session keeps the server up (verified end to end
+    // against a real host); anything left behind by a crash self-exits once
+    // the idle deadline passes with no live session.
+    expect(command).toContain('--enable-remote-auto-shutdown')
+    expect(command).toContain('--server-data-dir "$HOME/.dsh-remote-ssh/server-embedded/dsh-remote-ssh-demo-1-0"')
   })
 })

@@ -100,6 +100,8 @@ AHP etag 作为 opaque FsVersion，保持 read-before-write 和 stale-version �
 
 host runtime 请求 POSIX `/` Resource access，以实现 DSH 原生权限含义：Full Access 可跨 workspace；workspace-write 的 mutation 由 `RemoteSshFileSystem` 按每次调用的 `workspaceRoot` 检查；read-only 拒绝 mutation。AHP 授权范围不是 DSH workspace sandbox。
 
+远端 Agent Host 实例不随启动它的 SSH 会话退出（embedded code-server 忽略挂断信号并被 init 收养），因此每次连接尝试使用独立 data dir（`~/.dsh-remote-ssh/server-embedded/<clientId>-<generation>-<attempt>`），且所有放弃该尝试的路径（重连 retire、启动失败、dispose）都会经一次性 SSH 会话按该 data dir 精确 `pkill` 远端实例——匹配模式首字符加方括号以防误杀执行回收的会话本身，也不会命中其他 DSH 实例或别的 generation。回收是尽力而为且有 10s 上限。崩溃兜底分路径：standalone 守护进程自带 `--idle-timeout`；embedded 启动命令带 `--enable-remote-auto-shutdown`，已初始化的 AHP 会话（正常链路）会维持其存活，而进程级崩溃（kill -9/断电）遗留、无人连接的实例会在空闲约 5 分钟后自行退出。
+
 ## 远端文件打开
 
 Client 包装原有 `workspaces.openPath`，按文件 alias 或当前 Session 选择远端 Workspace。原生模式调用本机 VSC 兼容编辑器的标准 Remote SSH CLI：authority 为 `ssh-remote+<Host>`，文件名保持远端 POSIX 绝对路径。Windows 使用编辑器安装目录中的版本化 `resources/app/out/cli.js`，不会把 CLI 参数直接交给 GUI 入口。
