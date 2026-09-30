@@ -246,6 +246,187 @@ async function flushBackground(): Promise<void> {
   await new Promise<void>(resolvePromise => { setTimeout(resolvePromise, 0) })
 }
 
+describe('RemoteSshRuntime recovery backoff', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  function fakeTimers(): void {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+  }
+
+  /** setImmediate stays real, so one macrotask drains all pending microtasks. */
+  async function flushAsync(): Promise<void> {
+    await new Promise<void>(resolvePromise => { setImmediate(resolvePromise) })
+  }
+
+  it('retries a failed bootstrap with exponential backoff until it heals', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    fakeTimers()
+    const ctx = new Context()
+    const clients: FakeClient[] = []
+    let opens = 0
+    openFactory = () => {
+      opens += 1
+      if (opens === 2) throw new Error('ssh: connect timed out')
+      return trackClients(clients)
+    }
+    try {
+      await ctx.plugin(TestRuntime, {
+        sshTarget: 'test-host',
+        reconnectInitialDelayMs: 500,
+        reconnectMaxDelayMs: 5_000,
+      })
+      const runtime = ctx.remoteSsh
+      await runtime.getConnection()
+      expect(opens).toBe(1)
+
+      clients[0]!.close()
+      await flushAsync()
+      expect(opens).toBe(2)
+      expect(clients).toHaveLength(1)
+
+      await vi.advanceTimersByTimeAsync(499)
+      await flushAsync()
+      expect(opens).toBe(2)
+
+      await vi.advanceTimersByTimeAsync(1)
+      await flushAsync()
+      expect(opens).toBe(3)
+      expect(clients).toHaveLength(2)
+      expect((await runtime.getConnection()).client).toBe(clients[1])
+    } finally {
+      openFactory = undefined
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('caps the backoff delay at the configured maximum', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    fakeTimers()
+    const ctx = new Context()
+    const clients: FakeClient[] = []
+    let opens = 0
+    let healthy = true
+    openFactory = () => {
+      opens += 1
+      if (healthy) {
+        healthy = false
+        return trackClients(clients)
+      }
+      throw new Error('ssh: network unreachable')
+    }
+    try {
+      await ctx.plugin(TestRuntime, {
+        sshTarget: 'test-host',
+        reconnectInitialDelayMs: 500,
+        reconnectMaxDelayMs: 5_000,
+      })
+      const runtime = ctx.remoteSsh
+      await runtime.getConnection()
+      expect(opens).toBe(1)
+
+      clients[0]!.close()
+      // Attempts at t = 0, 500, 1500, 3500, 7500, 12500, 17500 with sleeps
+      // 500, 1000, 2000, 4000, then capped at 5000.
+      await vi.advanceTimersByTimeAsync(20_000)
+      await flushAsync()
+      expect(opens).toBe(8)
+
+      await vi.advanceTimersByTimeAsync(2_499)
+      await flushAsync()
+      expect(opens).toBe(8)
+
+      await vi.advanceTimersByTimeAsync(1)
+      await flushAsync()
+      expect(opens).toBe(9)
+    } finally {
+      openFactory = undefined
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('lets a consumer call bypass the backoff sleep, and the loop adopts it', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    fakeTimers()
+    const ctx = new Context()
+    const clients: FakeClient[] = []
+    let opens = 0
+    let failing = false
+    openFactory = () => {
+      opens += 1
+      if (failing) throw new Error('ssh: down')
+      return trackClients(clients)
+    }
+    try {
+      await ctx.plugin(TestRuntime, {
+        sshTarget: 'test-host',
+        reconnectInitialDelayMs: 500,
+        reconnectMaxDelayMs: 5_000,
+      })
+      const runtime = ctx.remoteSsh
+      await runtime.getConnection()
+
+      failing = true
+      clients[0]!.close()
+      await flushAsync()
+      expect(opens).toBe(2)
+
+      failing = false
+      const user = await runtime.getConnection()
+      expect(user.client).toBe(clients[1])
+      expect(opens).toBe(3)
+
+      await vi.advanceTimersByTimeAsync(1_000)
+      await flushAsync()
+      expect(opens).toBe(3)
+      expect(clients).toHaveLength(2)
+    } finally {
+      openFactory = undefined
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('resets the backoff after a healed link dies again', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    fakeTimers()
+    const ctx = new Context()
+    const clients: FakeClient[] = []
+    let opens = 0
+    openFactory = () => {
+      opens += 1
+      if (opens === 2) throw new Error('ssh: connect timed out')
+      return trackClients(clients)
+    }
+    try {
+      await ctx.plugin(TestRuntime, {
+        sshTarget: 'test-host',
+        reconnectInitialDelayMs: 500,
+        reconnectMaxDelayMs: 5_000,
+      })
+      const runtime = ctx.remoteSsh
+      await runtime.getConnection()
+
+      clients[0]!.close()
+      await flushAsync()
+      expect(opens).toBe(2)
+      await vi.advanceTimersByTimeAsync(500)
+      await flushAsync()
+      expect(clients).toHaveLength(2)
+      expect(opens).toBe(3)
+
+      clients[1]!.close()
+      await flushAsync()
+      expect(clients).toHaveLength(3)
+      expect(opens).toBe(4)
+    } finally {
+      openFactory = undefined
+      await ctx.fiber.dispose()
+    }
+  })
+})
+
 describe('RemoteSshRuntime heartbeat', () => {
   afterEach(() => {
     vi.useRealTimers()

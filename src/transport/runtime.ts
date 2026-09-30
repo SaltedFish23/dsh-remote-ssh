@@ -23,6 +23,8 @@ export interface Config {
   requestTimeoutMs?: number
   heartbeatIntervalMs?: number
   heartbeatTimeoutMs?: number
+  reconnectInitialDelayMs?: number
+  reconnectMaxDelayMs?: number
   protocolVersions?: string[]
   directUrl?: string
 }
@@ -36,6 +38,8 @@ interface ResolvedConfig extends Config {
   requestTimeoutMs: number
   heartbeatIntervalMs: number
   heartbeatTimeoutMs: number
+  reconnectInitialDelayMs: number
+  reconnectMaxDelayMs: number
   protocolVersions: string[]
 }
 
@@ -172,6 +176,8 @@ export class RemoteSshRuntime extends Service {
     requestTimeoutMs: z.number().default(30_000),
     heartbeatIntervalMs: z.number().default(30_000),
     heartbeatTimeoutMs: z.number().default(60_000),
+    reconnectInitialDelayMs: z.number().default(500),
+    reconnectMaxDelayMs: z.number().default(10_000),
     protocolVersions: z.array(z.string()).default([...DSH_AHP_PROTOCOL_VERSIONS]),
     directUrl: z.string(),
   })
@@ -201,6 +207,10 @@ export class RemoteSshRuntime extends Service {
   private heartbeatTimer: NodeJS.Timeout | undefined
   /** Guards against stacking probes while one awaits its pong deadline. */
   private heartbeatInFlight = false
+  /** The running background recovery loop; see {@link reconnectInBackground}. */
+  private recoveryLoop: Promise<void> | undefined
+  /** Aborted on dispose so a sleeping recovery loop exits promptly. */
+  private readonly recoveryAbort = new AbortController()
   private disposed = false
 
   constructor(ctx: Context, config: Config) {
@@ -220,6 +230,7 @@ export class RemoteSshRuntime extends Service {
     ctx.effect(() => async () => {
       this.disposed = true
       this.stopHeartbeat()
+      this.recoveryAbort.abort(new Error('dsh-remote-ssh: Remote SSH service disposed'))
       const pending = this.connection
       this.connection = undefined
       this.live = undefined
@@ -346,11 +357,42 @@ export class RemoteSshRuntime extends Service {
   /**
    * Heal a dead link without waiting for the next consumer request. The
    * shared single-flight attempt means a concurrent consumer call joins the
-   * same recovery instead of racing a private one. A failed bootstrap keeps
-   * its diagnostic for the next consumer call; the retry loop owns retries.
+   * same recovery instead of racing a private one; a consumer call during a
+   * backoff sleep attempts immediately and the loop adopts its result when it
+   * wakes. Failed bootstraps retry with exponential backoff and jitter,
+   * reset by every success.
    */
   private reconnectInBackground(): void {
-    void this.getConnection().catch(() => undefined)
+    if (this.recoveryLoop !== undefined) return
+    const loop = this.runRecoveryLoop().finally(() => {
+      if (this.recoveryLoop === loop) this.recoveryLoop = undefined
+    })
+    this.recoveryLoop = loop
+    void loop.catch(() => undefined)
+  }
+
+  private async runRecoveryLoop(): Promise<void> {
+    let delayMs = 0
+    for (;;) {
+      if (this.disposed) return
+      if (delayMs > 0) {
+        try {
+          await delay(jitter(delayMs), this.recoveryAbort.signal)
+        } catch {
+          return
+        }
+        if (this.disposed) return
+      }
+      try {
+        await this.getConnection()
+        return
+      } catch {
+        if (this.disposed) return
+        const initialMs = this.config.reconnectInitialDelayMs
+        const maxMs = Math.max(initialMs, this.config.reconnectMaxDelayMs)
+        delayMs = delayMs === 0 ? initialMs : Math.min(maxMs, delayMs * 2)
+      }
+    }
   }
 
   /**
@@ -420,6 +462,13 @@ export class RemoteSshRuntime extends Service {
     }
     if (!Number.isSafeInteger(heartbeatTimeoutMs) || heartbeatTimeoutMs <= 0) {
       throw new Error('dsh-remote-ssh: heartbeatTimeoutMs must be a positive integer')
+    }
+    const { reconnectInitialDelayMs, reconnectMaxDelayMs } = this.config
+    if (!Number.isSafeInteger(reconnectInitialDelayMs) || reconnectInitialDelayMs <= 0) {
+      throw new Error('dsh-remote-ssh: reconnectInitialDelayMs must be a positive integer')
+    }
+    if (!Number.isSafeInteger(reconnectMaxDelayMs) || reconnectMaxDelayMs <= 0) {
+      throw new Error('dsh-remote-ssh: reconnectMaxDelayMs must be a positive integer')
     }
     if (protocolVersions.length === 0 || protocolVersions.some(version => version.trim().length === 0)) {
       throw new Error('dsh-remote-ssh: protocolVersions must contain non-empty versions')
@@ -689,6 +738,31 @@ function withDeadline(promise: Promise<unknown>, timeoutMs: number, label: strin
       },
     )
   })
+}
+
+/** ±20% jitter so concurrent runtimes do not retry in lockstep. */
+function jitter(milliseconds: number): number {
+  return Math.max(1, Math.round(milliseconds * (0.8 + Math.random() * 0.4)))
+}
+
+function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) throw abortReason(signal)
+  return new Promise((resolve, reject) => {
+    const timer: NodeJS.Timeout = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, milliseconds)
+    timer.unref?.()
+    const onAbort = (): void => {
+      clearTimeout(timer)
+      reject(abortReason(signal))
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error('This operation was aborted')
 }
 
 function tailDiagnostic(value: string, maxLength = 2_000): string {
