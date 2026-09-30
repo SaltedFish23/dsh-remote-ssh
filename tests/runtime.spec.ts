@@ -6,13 +6,17 @@ import RemoteSshRuntime, {
   buildSshCommandArgs,
   type AhpConnection,
 } from '../src/transport/runtime.ts'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 /**
  * Minimal AHP client double: publishes its own state transitions and rejects
  * requests once closed, which is exactly the contract the runtime relies on.
+ * `pingBehavior` drives the protocol-level liveness probe: 'ok' answers,
+ * 'hang' never settles (half-open path), and an Error instance rejects.
  */
 class FakeClient {
+  pingBehavior: 'ok' | 'hang' | Error = 'ok'
+  pings = 0
   private state: ConnectionState = { status: 'connected' }
   private readonly closedSignal: Promise<void>
   private notifyClosed!: () => void
@@ -36,6 +40,12 @@ class FakeClient {
       reason: { type: 'transport', error: new TransportError('closed', 'transport closed') },
     }
     this.notifyClosed()
+  }
+
+  async ping(): Promise<void> {
+    this.pings += 1
+    if (this.pingBehavior === 'hang') return new Promise<void>(() => {})
+    if (this.pingBehavior instanceof Error) throw this.pingBehavior
   }
 
   async shutdown(): Promise<void> { this.close() }
@@ -152,6 +162,150 @@ describe('RemoteSshRuntime', () => {
     expect(runtime.connected).toBe(false)
     expect(clients[0]!.connectionState.status).toBe('closed')
     await expect(runtime.getConnection()).rejects.toThrow(/disposing/)
+  })
+})
+
+describe('RemoteSshRuntime heartbeat', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  function fakeTimers(): void {
+    // Fake only the plain timers the heartbeat uses, so cordis fiber
+    // scheduling keeps running on real macrotasks.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+  }
+
+  it('declares the link stale when a pong misses the heartbeat deadline', async () => {
+    fakeTimers()
+    const ctx = new Context()
+    const clients: FakeClient[] = []
+    openFactory = () => trackClients(clients)
+    try {
+      await ctx.plugin(TestRuntime, {
+        sshTarget: 'test-host',
+        heartbeatIntervalMs: 30_000,
+        heartbeatTimeoutMs: 60_000,
+      })
+      const runtime = ctx.remoteSsh
+      await runtime.getConnection()
+
+      clients[0]!.pingBehavior = 'hang'
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(clients[0]!.pings).toBe(1)
+      expect(runtime.connected).toBe(true)
+
+      await vi.advanceTimersByTimeAsync(59_999)
+      expect(runtime.connected).toBe(true)
+
+      await vi.advanceTimersByTimeAsync(1)
+      expect(runtime.connected).toBe(false)
+
+      const second = await runtime.getConnection()
+      expect(second.client).not.toBe(clients[0])
+      expect(clients).toHaveLength(2)
+    } finally {
+      openFactory = undefined
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('declares the link dead at the next tick when ping rejects', async () => {
+    fakeTimers()
+    const ctx = new Context()
+    const clients: FakeClient[] = []
+    openFactory = () => trackClients(clients)
+    try {
+      await ctx.plugin(TestRuntime, {
+        sshTarget: 'test-host',
+        heartbeatIntervalMs: 30_000,
+        heartbeatTimeoutMs: 60_000,
+      })
+      const runtime = ctx.remoteSsh
+      await runtime.getConnection()
+
+      clients[0]!.pingBehavior = new Error('connection reset')
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(runtime.connected).toBe(false)
+    } finally {
+      openFactory = undefined
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps a healthy link open across many answered pings', async () => {
+    fakeTimers()
+    const ctx = new Context()
+    const clients: FakeClient[] = []
+    openFactory = () => trackClients(clients)
+    try {
+      await ctx.plugin(TestRuntime, {
+        sshTarget: 'test-host',
+        heartbeatIntervalMs: 30_000,
+        heartbeatTimeoutMs: 60_000,
+      })
+      const runtime = ctx.remoteSsh
+      await runtime.getConnection()
+
+      await vi.advanceTimersByTimeAsync(5 * 30_000)
+      expect(clients[0]!.pings).toBe(5)
+      expect(runtime.connected).toBe(true)
+      expect(clients).toHaveLength(1)
+    } finally {
+      openFactory = undefined
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('stops probing once the heartbeat has declared the link dead', async () => {
+    fakeTimers()
+    const ctx = new Context()
+    const clients: FakeClient[] = []
+    openFactory = () => trackClients(clients)
+    try {
+      await ctx.plugin(TestRuntime, {
+        sshTarget: 'test-host',
+        heartbeatIntervalMs: 30_000,
+        heartbeatTimeoutMs: 60_000,
+      })
+      const runtime = ctx.remoteSsh
+      await runtime.getConnection()
+
+      clients[0]!.pingBehavior = new Error('connection reset')
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(clients[0]!.pings).toBe(1)
+      expect(runtime.connected).toBe(false)
+
+      await vi.advanceTimersByTimeAsync(3 * 30_000)
+      expect(clients[0]!.pings).toBe(1)
+    } finally {
+      openFactory = undefined
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('does not probe a link that watch() already reported closed', async () => {
+    fakeTimers()
+    const ctx = new Context()
+    const clients: FakeClient[] = []
+    openFactory = () => trackClients(clients)
+    try {
+      await ctx.plugin(TestRuntime, {
+        sshTarget: 'test-host',
+        heartbeatIntervalMs: 30_000,
+        heartbeatTimeoutMs: 60_000,
+      })
+      const runtime = ctx.remoteSsh
+      await runtime.getConnection()
+
+      clients[0]!.close()
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(clients[0]!.pings).toBe(0)
+      expect(runtime.connected).toBe(false)
+    } finally {
+      openFactory = undefined
+      await ctx.fiber.dispose()
+    }
   })
 })
 

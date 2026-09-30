@@ -21,6 +21,8 @@ export interface Config {
   remoteRuntimeRoot?: string
   startupTimeoutMs?: number
   requestTimeoutMs?: number
+  heartbeatIntervalMs?: number
+  heartbeatTimeoutMs?: number
   protocolVersions?: string[]
   directUrl?: string
 }
@@ -32,6 +34,8 @@ interface ResolvedConfig extends Config {
   remoteRuntimeRoot: string
   startupTimeoutMs: number
   requestTimeoutMs: number
+  heartbeatIntervalMs: number
+  heartbeatTimeoutMs: number
   protocolVersions: string[]
 }
 
@@ -166,6 +170,8 @@ export class RemoteSshRuntime extends Service {
     remoteRuntimeRoot: z.string().default('/tmp/dsh-remote-ssh'),
     startupTimeoutMs: z.number().default(600_000),
     requestTimeoutMs: z.number().default(30_000),
+    heartbeatIntervalMs: z.number().default(30_000),
+    heartbeatTimeoutMs: z.number().default(60_000),
     protocolVersions: z.array(z.string()).default([...DSH_AHP_PROTOCOL_VERSIONS]),
     directUrl: z.string(),
   })
@@ -191,6 +197,8 @@ export class RemoteSshRuntime extends Service {
   private stale = false
   /** Connection-attempt counter; one remote Host instance per attempt. */
   private generation = 0
+  /** Periodic protocol-level liveness probe of {@link live}; see {@link startHeartbeat}. */
+  private heartbeatTimer: NodeJS.Timeout | undefined
   private disposed = false
 
   constructor(ctx: Context, config: Config) {
@@ -209,6 +217,7 @@ export class RemoteSshRuntime extends Service {
     this.begin()
     ctx.effect(() => async () => {
       this.disposed = true
+      this.stopHeartbeat()
       const pending = this.connection
       this.connection = undefined
       this.live = undefined
@@ -278,6 +287,7 @@ export class RemoteSshRuntime extends Service {
       this.live = connection.client
       this.stale = false
       this.watch(connection)
+      this.startHeartbeat(connection.client)
       return connection
     })
     this.connection = pending
@@ -298,6 +308,7 @@ export class RemoteSshRuntime extends Service {
     this.connection = undefined
     this.live = undefined
     this.stale = false
+    this.stopHeartbeat()
     void pending?.catch(() => {})
     this.tunnel?.kill()
     this.tunnel = undefined
@@ -329,6 +340,38 @@ export class RemoteSshRuntime extends Service {
     this.stale = true
   }
 
+  /**
+   * Probe the settled link with the protocol-level `ping` command. The SSH
+   * keepalive covers a dead transport; this additionally catches a wedged
+   * Agent Host behind a live tunnel and complements the client's own
+   * close-state publication, which cannot fire on a half-open path.
+   */
+  private startHeartbeat(client: AhpClient): void {
+    this.stopHeartbeat()
+    const intervalMs = this.config.heartbeatIntervalMs
+    this.heartbeatTimer = setInterval(() => { void this.probeHeartbeat(client) }, intervalMs)
+    this.heartbeatTimer.unref?.()
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer === undefined) return
+    clearInterval(this.heartbeatTimer)
+    this.heartbeatTimer = undefined
+  }
+
+  private async probeHeartbeat(client: AhpClient): Promise<void> {
+    if (this.disposed || this.live !== client || this.stale) return
+    try {
+      await withDeadline(client.ping(), this.config.heartbeatTimeoutMs, 'dsh-remote-ssh: Agent Host heartbeat timed out')
+    } catch {
+      // Stop probing once the link is declared dead; teardown and reopening
+      // stay owned by the shared connection attempt so consumers race one
+      // recovery instead of a private one.
+      this.stopHeartbeat()
+      this.markStale()
+    }
+  }
+
   /** Workspace mapper for the legacy single-workspace providers. */
   getMapper(): WorkspacePathMapper {
     if (this.mapper === undefined) throw new Error('dsh-remote-ssh: this shared host runtime has no default workspace mapper')
@@ -349,6 +392,13 @@ export class RemoteSshRuntime extends Service {
     }
     if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs <= 0) {
       throw new Error('dsh-remote-ssh: requestTimeoutMs must be a positive integer')
+    }
+    const { heartbeatIntervalMs, heartbeatTimeoutMs } = this.config
+    if (!Number.isSafeInteger(heartbeatIntervalMs) || heartbeatIntervalMs <= 0) {
+      throw new Error('dsh-remote-ssh: heartbeatIntervalMs must be a positive integer')
+    }
+    if (!Number.isSafeInteger(heartbeatTimeoutMs) || heartbeatTimeoutMs <= 0) {
+      throw new Error('dsh-remote-ssh: heartbeatTimeoutMs must be a positive integer')
     }
     if (protocolVersions.length === 0 || protocolVersions.some(version => version.trim().length === 0)) {
       throw new Error('dsh-remote-ssh: protocolVersions must contain non-empty versions')
@@ -603,6 +653,21 @@ function stripAnsi(value: string): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/** Reject with `label` unless `promise` settles within `timeoutMs`. */
+function withDeadline(promise: Promise<unknown>, timeoutMs: number, label: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer: NodeJS.Timeout = setTimeout(() => { reject(new Error(label)) }, timeoutMs)
+    timer.unref?.()
+    promise.then(
+      () => { clearTimeout(timer); resolve() },
+      error => {
+        clearTimeout(timer)
+        reject(error instanceof Error ? error : new Error(String(error)))
+      },
+    )
+  })
 }
 
 function tailDiagnostic(value: string, maxLength = 2_000): string {
