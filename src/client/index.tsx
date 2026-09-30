@@ -23,7 +23,11 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 }
 
 export const name = 'dsh-remote-ssh-client'
-export const inject = ['slots', 'workspaces', 'sessions', 'locale']
+// `uiWorkspace` is provided by the ui-workspace plugin's own fiber, so cordis
+// only exposes it to a context that declares it here; without this entry the
+// local directory browser fails with
+// `cannot get property "uiWorkspace" without inject`.
+export const inject = ['slots', 'workspaces', 'sessions', 'locale', 'uiWorkspace']
 
 /** Register the localized settings and workspace flow. */
 export async function apply(ctx: ClientContext): Promise<void> {
