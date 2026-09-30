@@ -5,6 +5,7 @@ import RemoteSshRuntime, {
   SSH_KEEPALIVE_ARGS,
   buildSshCommandArgs,
   type AhpConnection,
+  type RemoteSshLinkEvent,
 } from '../src/transport/runtime.ts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -245,6 +246,156 @@ describe('RemoteSshRuntime', () => {
 async function flushBackground(): Promise<void> {
   await new Promise<void>(resolvePromise => { setTimeout(resolvePromise, 0) })
 }
+
+describe('RemoteSshRuntime link state push', () => {
+  it('reports connected and pushes reconnecting → connected when the link heals', async () => {
+    const ctx = new Context()
+    const clients: FakeClient[] = []
+    openFactory = () => trackClients(clients)
+    try {
+      await ctx.plugin(TestRuntime, { sshTarget: 'test-host' })
+      const runtime = ctx.remoteSsh
+      await runtime.getConnection()
+      expect(runtime.state).toBe('connected')
+
+      const events: RemoteSshLinkEvent[] = []
+      runtime.onStateChange(event => { events.push(event) })
+
+      clients[0]!.close()
+      await flushBackground()
+
+      expect(events).toEqual([{ state: 'reconnecting' }, { state: 'connected' }])
+      expect(runtime.state).toBe('connected')
+    } finally {
+      openFactory = undefined
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('carries the failure diagnostic while recovery retries', async () => {
+    const ctx = new Context()
+    const clients: FakeClient[] = []
+    let opens = 0
+    openFactory = () => {
+      opens += 1
+      if (opens === 1) return trackClients(clients)
+      throw new Error('ssh: network unreachable')
+    }
+    try {
+      await ctx.plugin(TestRuntime, { sshTarget: 'test-host' })
+      const runtime = ctx.remoteSsh
+      await runtime.getConnection()
+
+      const events: RemoteSshLinkEvent[] = []
+      runtime.onStateChange(event => { events.push(event) })
+
+      clients[0]!.close()
+      await flushBackground()
+
+      expect(events).toEqual([
+        { state: 'reconnecting' },
+        { state: 'reconnecting', error: 'ssh: network unreachable' },
+      ])
+      expect(runtime.state).toBe('reconnecting')
+    } finally {
+      openFactory = undefined
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('marks a never-connected runtime failed, then connecting → connected on retry', async () => {
+    const ctx = new Context()
+    const clients: FakeClient[] = []
+    let opens = 0
+    openFactory = () => {
+      opens += 1
+      if (opens === 1) throw new Error('ssh: could not resolve hostname test-host')
+      return trackClients(clients)
+    }
+    try {
+      await ctx.plugin(TestRuntime, { sshTarget: 'test-host' })
+      const runtime = ctx.remoteSsh
+      await flushBackground()
+      expect(runtime.state).toBe('failed')
+
+      const events: RemoteSshLinkEvent[] = []
+      runtime.onStateChange(event => { events.push(event) })
+
+      await runtime.getConnection()
+      expect(events).toEqual([{ state: 'connecting' }, { state: 'connected' }])
+      expect(runtime.state).toBe('connected')
+    } finally {
+      openFactory = undefined
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('publishes disposed on teardown and accepts late unsubscription', async () => {
+    const ctx = new Context()
+    const clients: FakeClient[] = []
+    openFactory = () => trackClients(clients)
+    await ctx.plugin(TestRuntime, { sshTarget: 'test-host' })
+    const runtime = ctx.remoteSsh
+    await runtime.getConnection()
+
+    const events: RemoteSshLinkEvent[] = []
+    const unsubscribe = runtime.onStateChange(event => { events.push(event) })
+
+    await ctx.fiber.dispose()
+    openFactory = undefined
+
+    expect(events).toEqual([{ state: 'disposed' }])
+    expect(runtime.state).toBe('disposed')
+    expect(() => unsubscribe()).not.toThrow()
+  })
+
+  it('stops delivering events after unsubscription', async () => {
+    const ctx = new Context()
+    const clients: FakeClient[] = []
+    openFactory = () => trackClients(clients)
+    try {
+      await ctx.plugin(TestRuntime, { sshTarget: 'test-host' })
+      const runtime = ctx.remoteSsh
+      await runtime.getConnection()
+
+      const events: RemoteSshLinkEvent[] = []
+      const unsubscribe = runtime.onStateChange(event => { events.push(event) })
+      unsubscribe()
+
+      clients[0]!.close()
+      await flushBackground()
+      expect(events).toEqual([])
+    } finally {
+      openFactory = undefined
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('isolates a throwing listener from other subscribers and the link', async () => {
+    const ctx = new Context()
+    const clients: FakeClient[] = []
+    openFactory = () => trackClients(clients)
+    try {
+      await ctx.plugin(TestRuntime, { sshTarget: 'test-host' })
+      const runtime = ctx.remoteSsh
+      await runtime.getConnection()
+
+      const events: RemoteSshLinkEvent[] = []
+      runtime.onStateChange(() => { throw new Error('listener bug') })
+      runtime.onStateChange(event => { events.push(event) })
+
+      clients[0]!.close()
+      await flushBackground()
+
+      expect(events).toEqual([{ state: 'reconnecting' }, { state: 'connected' }])
+      expect(clients).toHaveLength(2)
+      expect(runtime.state).toBe('connected')
+    } finally {
+      openFactory = undefined
+      await ctx.fiber.dispose()
+    }
+  })
+})
 
 describe('RemoteSshRuntime recovery backoff', () => {
   afterEach(() => {

@@ -49,6 +49,24 @@ export interface AhpConnection {
   defaultDirectory?: string
 }
 
+/**
+ * Pushed view of the shared Agent Host link. `connecting` has not observed a
+ * failure yet (first attempt or a consumer-driven refresh), `reconnecting`
+ * follows an observed death and covers every backoff retry, and `failed` is
+ * a first-time attempt that gave up with no recovery loop running. Map to a
+ * traffic light the way the environment status does: yellow, green, red,
+ * red, gray.
+ */
+export type RemoteSshLinkState = 'connecting' | 'connected' | 'reconnecting' | 'failed' | 'disposed'
+
+export interface RemoteSshLinkEvent {
+  readonly state: RemoteSshLinkState
+  /** Human-readable cause of the latest failure, when one is known. */
+  readonly error?: string
+}
+
+export type RemoteSshLinkListener = (event: RemoteSshLinkEvent) => void
+
 export function quotePosix(value: string): string {
   if (value.includes('\0')) throw new Error('remote command arguments cannot contain NUL bytes')
   return `'${value.replaceAll("'", "'\"'\"'")}'`
@@ -211,6 +229,10 @@ export class RemoteSshRuntime extends Service {
   private recoveryLoop: Promise<void> | undefined
   /** Aborted on dispose so a sleeping recovery loop exits promptly. */
   private readonly recoveryAbort = new AbortController()
+  /** Pushed link state; see {@link onStateChange}. */
+  private linkState: RemoteSshLinkState = 'connecting'
+  private linkError: string | undefined
+  private readonly linkListeners = new Set<RemoteSshLinkListener>()
   private disposed = false
 
   constructor(ctx: Context, config: Config) {
@@ -231,6 +253,7 @@ export class RemoteSshRuntime extends Service {
       this.disposed = true
       this.stopHeartbeat()
       this.recoveryAbort.abort(new Error('dsh-remote-ssh: Remote SSH service disposed'))
+      this.publishState('disposed')
       const pending = this.connection
       this.connection = undefined
       this.live = undefined
@@ -254,6 +277,32 @@ export class RemoteSshRuntime extends Service {
   get connected(): boolean {
     if (this.disposed || this.stale) return false
     return this.live === undefined || this.live.connectionState.status !== 'closed'
+  }
+
+  /** Current pushed link state; the pull counterpart of {@link onStateChange}. */
+  get state(): RemoteSshLinkState {
+    return this.linkState
+  }
+
+  /**
+   * Subscribe to link state transitions. The current state is not replayed;
+   * poll {@link state} after subscribing. Listener errors are swallowed so a
+   * broken consumer cannot take the link down with it.
+   */
+  onStateChange(listener: RemoteSshLinkListener): () => void {
+    this.linkListeners.add(listener)
+    return () => { this.linkListeners.delete(listener) }
+  }
+
+  /** Publish a state transition, skipping no-op republishes. */
+  private publishState(state: RemoteSshLinkState, error?: string): void {
+    if (this.linkState === state && this.linkError === error) return
+    this.linkState = state
+    this.linkError = error
+    const event: RemoteSshLinkEvent = error === undefined ? { state } : { state, error }
+    for (const listener of [...this.linkListeners]) {
+      try { listener(event) } catch { /* a broken consumer must not affect the link */ }
+    }
   }
 
   /**
@@ -295,17 +344,26 @@ export class RemoteSshRuntime extends Service {
 
   /** Queue one connection attempt and attach its liveness watchers. */
   private begin(): Promise<AhpConnection> {
+    // A retry inside the recovery loop stays 'reconnecting'; every other
+    // attempt (first open, consumer-driven refresh after invalidation) reads
+    // as a plain start.
+    if (this.linkState !== 'reconnecting') this.publishState('connecting')
     const pending = this.open().then(connection => {
       if (this.connection !== pending) return connection
       this.live = connection.client
       this.stale = false
       this.watch(connection)
       this.startHeartbeat(connection.client)
+      this.publishState('connected')
       return connection
     })
     this.connection = pending
-    void pending.catch(() => {
-      if (this.connection === pending) this.connection = undefined
+    void pending.catch(error => {
+      if (this.connection !== pending) return
+      this.connection = undefined
+      const message = errorMessage(error)
+      if (this.linkState === 'reconnecting') this.publishState('reconnecting', message)
+      else this.publishState('failed', message)
     })
     return pending
   }
@@ -351,6 +409,7 @@ export class RemoteSshRuntime extends Service {
   private markStale(): void {
     if (this.disposed || this.stale) return
     this.stale = true
+    this.publishState('reconnecting')
     this.reconnectInBackground()
   }
 
@@ -386,8 +445,11 @@ export class RemoteSshRuntime extends Service {
       try {
         await this.getConnection()
         return
-      } catch {
+      } catch (error) {
         if (this.disposed) return
+        // begin() already published the diagnostic; republish only when the
+        // recovery loop is the sole observer of this failure.
+        this.publishState('reconnecting', errorMessage(error))
         const initialMs = this.config.reconnectInitialDelayMs
         const maxMs = Math.max(initialMs, this.config.reconnectMaxDelayMs)
         delayMs = delayMs === 0 ? initialMs : Math.min(maxMs, delayMs * 2)
