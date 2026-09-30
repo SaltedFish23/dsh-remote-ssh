@@ -62,6 +62,26 @@ export function buildListEmbeddedAgentHostsCommand(): string {
   return 'find "$HOME/.vscode-server/cli/servers" -type f -path \'*/server/bin/code-server\' -perm -u+x -printf \'%T@ %p\\n\' 2>/dev/null | sort -nr | cut -d \' \' -f 2-'
 }
 
+/**
+ * Transport-level keepalive shared by every SSH session the runtime opens.
+ * Without it, a silently black-holed path leaves one-shot command sessions
+ * hanging until `startupTimeoutMs` (default 600s) instead of failing after
+ * roughly interval × count.
+ */
+export const SSH_KEEPALIVE_ARGS: readonly string[] = [
+  '-o', 'ServerAliveInterval=15',
+  '-o', 'ServerAliveCountMax=3',
+]
+
+/** Args of one short-lived `ssh -T` command session: startup, probes, token reads. */
+export function buildSshCommandArgs(
+  sshArgs: readonly string[],
+  sshTarget: string,
+  command: string,
+): string[] {
+  return [...sshArgs, ...SSH_KEEPALIVE_ARGS, '-T', sshTarget, command]
+}
+
 /** Build the fallback bootstrap for a VS Code Server installation left by Remote - SSH. */
 export function buildEmbeddedAgentHostCommand(codeServerPath?: string, instanceId = 'default'): string {
   if (!/^[a-zA-Z0-9._-]+$/.test(instanceId)) throw new Error(`invalid embedded Agent Host instance id: ${instanceId}`)
@@ -377,7 +397,7 @@ export class RemoteSshRuntime extends Service {
     try {
       startup = await runCaptured(
         this.config.sshExecutable,
-        [...this.config.sshArgs, '-T', this.config.sshTarget, startupCommand],
+        buildSshCommandArgs(this.config.sshArgs, this.config.sshTarget, startupCommand),
         this.config.startupTimeoutMs,
       )
     } catch (error: unknown) {
@@ -428,7 +448,7 @@ export class RemoteSshRuntime extends Service {
   private async listEmbeddedAgentHosts(): Promise<string[]> {
     const result = await runCaptured(
       this.config.sshExecutable,
-      [...this.config.sshArgs, '-T', this.config.sshTarget, buildListEmbeddedAgentHostsCommand()],
+      buildSshCommandArgs(this.config.sshArgs, this.config.sshTarget, buildListEmbeddedAgentHostsCommand()),
       Math.min(this.config.startupTimeoutMs, 30_000),
     )
     if (result.exitCode !== 0) return []
@@ -437,12 +457,11 @@ export class RemoteSshRuntime extends Service {
 
   private async startEmbeddedAgentHost(codeServerPath: string, attempt: number): Promise<string> {
     const instanceId = `${this.clientId}-${this.generation}-${attempt}`
-    const child = spawn(this.config.sshExecutable, [
-      ...this.config.sshArgs,
-      '-T',
+    const child = spawn(this.config.sshExecutable, buildSshCommandArgs(
+      this.config.sshArgs,
       this.config.sshTarget,
       buildEmbeddedAgentHostCommand(codeServerPath, instanceId),
-    ], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+    ), { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
     this.embeddedAgentHost = child
     // The remote Host is started through one SSH session: when that session
     // ends, the Agent Host behind it is unreachable and the link is dead.
@@ -460,7 +479,11 @@ export class RemoteSshRuntime extends Service {
     }
     const tokenResult = await runCaptured(
       this.config.sshExecutable,
-      [...this.config.sshArgs, '-T', this.config.sshTarget, `cat "$HOME/.dsh-remote-ssh/server-embedded/${instanceId}/data/token"`],
+      buildSshCommandArgs(
+        this.config.sshArgs,
+        this.config.sshTarget,
+        `cat "$HOME/.dsh-remote-ssh/server-embedded/${instanceId}/data/token"`,
+      ),
       Math.min(this.config.startupTimeoutMs, 30_000),
     )
     const token = tokenResult.stdout.trim()
@@ -479,10 +502,7 @@ export class RemoteSshRuntime extends Service {
       '-N',
       '-o',
       'ExitOnForwardFailure=yes',
-      '-o',
-      'ServerAliveInterval=15',
-      '-o',
-      'ServerAliveCountMax=3',
+      ...SSH_KEEPALIVE_ARGS,
       '-L',
       `127.0.0.1:${localPort}:127.0.0.1:${remotePort}`,
       this.config.sshTarget,

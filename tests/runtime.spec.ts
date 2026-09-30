@@ -1,7 +1,11 @@
 import type { AhpClient } from '@microsoft/agent-host-protocol/client'
 import { ClientClosedError, TransportError, type ConnectionState } from '@microsoft/agent-host-protocol/client'
 import { Context } from '@deepseek-ai/cordis'
-import RemoteSshRuntime, { type AhpConnection } from '../src/transport/runtime.ts'
+import RemoteSshRuntime, {
+  SSH_KEEPALIVE_ARGS,
+  buildSshCommandArgs,
+  type AhpConnection,
+} from '../src/transport/runtime.ts'
 import { describe, expect, it } from 'vitest'
 
 /**
@@ -148,5 +152,36 @@ describe('RemoteSshRuntime', () => {
     expect(runtime.connected).toBe(false)
     expect(clients[0]!.connectionState.status).toBe('closed')
     await expect(runtime.getConnection()).rejects.toThrow(/disposing/)
+  })
+})
+
+describe('SSH command args', () => {
+  it('exposes keepalive options as well-formed -o pairs', () => {
+    expect(SSH_KEEPALIVE_ARGS).toEqual([
+      '-o', 'ServerAliveInterval=15',
+      '-o', 'ServerAliveCountMax=3',
+    ])
+  })
+
+  it('builds one-shot command sessions with keepalive before the target', () => {
+    const args = buildSshCommandArgs(['-i', '~/.ssh/id_ed25519'], 'dev-box', 'uptime')
+    expect(args).toEqual([
+      '-i', '~/.ssh/id_ed25519',
+      '-o', 'ServerAliveInterval=15',
+      '-o', 'ServerAliveCountMax=3',
+      '-T',
+      'dev-box',
+      'uptime',
+    ])
+  })
+
+  it('keeps user args intact and does not mutate the input', () => {
+    const userArgs = ['-i', '~/.ssh/key', '-p', '2222']
+    const args = buildSshCommandArgs(userArgs, 'host', 'true')
+    expect(args.slice(0, 4)).toEqual(userArgs)
+    expect(args).toContain('-T')
+    expect(args.at(-2)).toBe('host')
+    expect(args.at(-1)).toBe('true')
+    expect(userArgs).toEqual(['-i', '~/.ssh/key', '-p', '2222'])
   })
 })
