@@ -42,7 +42,12 @@ export function RemoteWorkspaceFlow(props: DirectoryFlowOwnerProps & RemoteWorks
     props.onPicked(adopted.path)
   }
   const chooseRemote = async (): Promise<void> => {
-    const created = await request<{ aliasPath: string }>(WORKSPACE_PATH, 'POST', { serverId, remotePath })
+    const server = state.servers.find(candidate => candidate.id === serverId)
+    const created = await request<{ aliasPath: string }>(WORKSPACE_PATH, 'POST', {
+      serverId,
+      remotePath,
+      ...(server?.remoteOs === undefined ? {} : { remoteOs: server.remoteOs }),
+    })
     props.onPicked(created.aliasPath)
   }
 

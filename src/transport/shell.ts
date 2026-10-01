@@ -17,6 +17,15 @@ import type { SubprocessOutputRead, SubprocessOutputReader } from '@deepseek-ai/
 import z from '@deepseek-ai/schemastery'
 import type { RemoteSshRuntime } from './runtime.ts'
 import { fileUriFromPosixPath, quotePosix, WorkspacePathMapper } from './runtime.ts'
+import { normalizeRemotePath, toNativeRemotePath, type RemoteOs } from './remote-paths.ts'
+import {
+  buildPowerShellProcessScript,
+  POWERSHELL_UTF8_PREAMBLE,
+  powerShellCommand,
+  psMarkerBegin,
+  psMarkerEnd,
+  quotePowerShell,
+} from './powershell.ts'
 
 export interface Config {
   defaultTimeoutMs?: number
@@ -71,7 +80,7 @@ export class RemoteSshShellExecutor extends ShellExecutor {
       throw new Error('dsh-remote-ssh/shell: localWorkspace and remoteWorkspace must be configured together')
     }
     this.mapper = config.localWorkspace !== undefined && config.remoteWorkspace !== undefined
-      ? new WorkspacePathMapper(config.localWorkspace, config.remoteWorkspace)
+      ? new WorkspacePathMapper(config.localWorkspace, config.remoteWorkspace, this.remoteOs)
       : mapperOf(this.remote)
     this.validate()
     ctx.effect(() => async () => {
@@ -107,6 +116,11 @@ export class RemoteSshShellExecutor extends ShellExecutor {
     this.processes.add(process)
     void process.done.finally(() => { this.processes.delete(process) })
     return Promise.resolve(process)
+  }
+
+  /** OS dialect of the remote host; test doubles default to POSIX. */
+  private get remoteOs(): RemoteOs {
+    return this.remote.remoteOs ?? 'posix'
   }
 
   private validate(): void {
@@ -207,7 +221,8 @@ async function executeTerminal(
   const client = await remote.getClient()
   const token = randomUUID()
   const terminalUri = `ahp-terminal:/${token}`
-  const commandPath = posix.join(remote.runtimeRoot, `command-${token}.sh`)
+  const os: RemoteOs = remote.remoteOs ?? 'posix'
+  const commandPath = posix.join(remote.runtimeRoot, `command-${token}.${os === 'windows' ? 'ps1' : 'sh'}`)
   const stdinPath = posix.join(remote.runtimeRoot, `stdin-${token}.bin`)
   const commandUri = fileUriFromPosixPath(commandPath)
   const stdinUri = fileUriFromPosixPath(stdinPath)
@@ -229,7 +244,16 @@ async function executeTerminal(
 
   try {
     if (spec.signal?.aborted) stop('abort')
-    await client.resourceWrite({ uri: commandUri, data: spec.command, encoding: UTF8, contentType: 'text/x-shellscript' })
+    const invocation = buildTerminalInvocation(os, {
+      token,
+      command: spec.command,
+      env: mergeEnvironment(mapper, spec),
+      shellCommand,
+      commandPath,
+      stdinPath,
+      stdinCreated: spec.stdin !== undefined,
+    })
+    await client.resourceWrite({ uri: commandUri, data: invocation.payload, encoding: UTF8, contentType: invocation.contentType })
     if (spec.stdin !== undefined) {
       await client.resourceWrite({ uri: stdinUri, data: Buffer.from(spec.stdin).toString('base64'), encoding: 'base64' as ContentEncoding })
       stdinCreated = true
@@ -253,16 +277,12 @@ async function executeTerminal(
       spec.signal.addEventListener('abort', abortListener, { once: true })
     }
 
-    const env = mergeEnvironment(mapper, spec)
-    const envArgs = Object.entries(env).map(([key, value]) => `${key}=${quotePosix(value)}`).join(' ')
-    const stdinRedirect = stdinCreated ? quotePosix(stdinPath) : '/dev/null'
     // Control-byte markers distinguish executed output from PTY prompt/input
     // echo even when the embedded Agent Host exposes no command-detection
     // actions. The echoed source contains the printable escape spelling, not
-    // the RS/US bytes emitted by printf.
+    // the RS/US bytes emitted by printf — or, on Windows, only base64.
     const marker = new TerminalOutputCapture(token, output)
-    const input = `printf '\\036DSH:${token}:BEGIN\\037'; env ${envArgs} ${quotePosix(shellCommand)} ${quotePosix(commandPath)} < ${stdinRedirect}; __dsh_status=$?; printf '\\036DSH:${token}:END:%s\\037' "$__dsh_status"; exit "$__dsh_status"\r`
-    client.dispatch(terminalUri, { type: ActionType.TerminalInput, data: input })
+    client.dispatch(terminalUri, { type: ActionType.TerminalInput, data: `${invocation.input}\r` })
 
     let commandId: string | undefined
     for (;;) {
@@ -337,6 +357,82 @@ async function executeTerminal(
   }
 }
 
+export interface TerminalInvocation {
+  /** Staged payload content written to the command Resource. */
+  payload: string
+  /** Content type declared for the staged payload. */
+  contentType: string
+  /** Line typed into the AHP terminal to run the staged payload. */
+  input: string
+}
+
+/**
+ * Build the staged payload and the PTY input line for one shell call.
+ *
+ * POSIX keeps the historic one-liner (`printf` markers, `env` prefix, `<`
+ * redirection). Windows stages a `.ps1` payload and types a
+ * `powershell -EncodedCommand` wrapper — the wrapper survives any DefaultShell
+ * (cmd or PowerShell) unescaped, applies the environment, copies the staged
+ * stdin file into the child, and re-emits the exact same RS/US marker bytes
+ * via `[Console]::Write` so the local parser is unchanged.
+ */
+export function buildTerminalInvocation(os: RemoteOs, params: {
+  token: string
+  command: string
+  env: Record<string, string>
+  shellCommand: string
+  commandPath: string
+  stdinPath: string
+  stdinCreated: boolean
+}): TerminalInvocation {
+  if (os === 'posix') {
+    const envArgs = Object.entries(params.env).map(([key, value]) => `${key}=${quotePosix(value)}`).join(' ')
+    const stdinRedirect = params.stdinCreated ? quotePosix(params.stdinPath) : '/dev/null'
+    return {
+      payload: params.command,
+      contentType: 'text/x-shellscript',
+      input: `printf '\\036DSH:${params.token}:BEGIN\\037'; env ${envArgs} ${quotePosix(params.shellCommand)} ${quotePosix(params.commandPath)} < ${stdinRedirect}; __dsh_status=$?; printf '\\036DSH:${params.token}:END:%s\\037' "$__dsh_status"; exit "$__dsh_status"`,
+    }
+  }
+  const lines: string[] = []
+  for (const [key, value] of Object.entries(params.env)) {
+    const native = key === 'DSH_CWD' ? toNativeRemotePath(os, normalizeRemotePath(os, value)) : value
+    lines.push(`$env:${key} = ${quotePowerShell(native)}`)
+  }
+  lines.push(
+    psMarkerBegin(params.token),
+    `$dsh_shell = ${quotePowerShell(params.shellCommand)}`,
+    `if ($dsh_shell -eq 'pwsh' -and -not (Get-Command pwsh -ErrorAction SilentlyContinue)) { $dsh_shell = 'powershell' }`,
+    '$psi = New-Object System.Diagnostics.ProcessStartInfo',
+    '$psi.FileName = $dsh_shell',
+    `$psi.Arguments = ${quotePowerShell(`-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${toNativeRemotePath(os, params.commandPath)}"`)}`,
+    '$psi.UseShellExecute = $false',
+    '$psi.RedirectStandardInput = $true',
+    '$p = [System.Diagnostics.Process]::Start($psi)',
+  )
+  if (params.stdinCreated) {
+    lines.push(
+      `$stdinFile = [System.IO.File]::OpenRead(${quotePowerShell(toNativeRemotePath(os, params.stdinPath))})`,
+      // The payload may exit without reading stdin; a broken pipe then ends
+      // the copy instead of failing the wrapper.
+      'try { $stdinFile.CopyTo($p.StandardInput.BaseStream) } catch { }',
+      '$stdinFile.Close()',
+    )
+  }
+  lines.push(
+    'try { $p.StandardInput.Close() } catch { }',
+    '$p.WaitForExit()',
+    '$dsh_status = $p.ExitCode',
+    psMarkerEnd(params.token, '$dsh_status'),
+    'exit $dsh_status',
+  )
+  return {
+    payload: `${POWERSHELL_UTF8_PREAMBLE}\n${params.command}`,
+    contentType: 'text/x-powershell',
+    input: powerShellCommand(lines.join('\n')),
+  }
+}
+
 class TerminalOutputCapture {
   readonly begin: string
   readonly endPrefix: string
@@ -380,10 +476,11 @@ class TerminalOutputCapture {
       return undefined
     }
     const raw = this.pending.slice(statusStart, terminator)
-    if (!/^\d+$/.test(raw)) throw new Error(`Agent Host terminal emitted an invalid exit marker: ${JSON.stringify(raw)}`)
+    // A Windows wrapper may echo a carriage return before the US terminator.
+    if (!/^\d+\r?$/.test(raw)) throw new Error(`Agent Host terminal emitted an invalid exit marker: ${JSON.stringify(raw)}`)
     this.finished = true
     this.pending = ''
-    return Number(raw)
+    return Number(raw.replace(/\r$/, ''))
   }
 }
 

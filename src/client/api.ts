@@ -26,6 +26,7 @@ export interface Server {
   hostName?: string
   user?: string
   port?: number
+  remoteOs?: 'posix' | 'windows'
 }
 
 export interface Workspace {

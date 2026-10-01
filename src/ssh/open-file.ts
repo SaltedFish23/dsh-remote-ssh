@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os'
 import { basename, delimiter, dirname, isAbsolute, resolve } from 'node:path'
 import { posix } from 'node:path'
 import type { RemoteOpenFileMode, RemoteSshManager } from '../routing/manager.ts'
+import { routeRemoteOs } from '../routing/manager.ts'
+import { isRemoteAbsolutePath, normalizeRemotePath, toNativeRemotePath } from '../transport/remote-paths.ts'
 
 type KnownEditorId = Exclude<RemoteOpenFileMode, 'auto' | 'custom' | 'download'>
 
@@ -86,7 +88,8 @@ export async function openRemoteFile(
   inputPath: string,
 ): Promise<RemoteOpenFileResult> {
   const route = manager.workspace(workspaceId)
-  const remotePath = route.mapper.toRemotePath(inputPath, route.aliasPath)
+  const os = routeRemoteOs(route)
+  const remotePath = toNativeRemotePath(os, normalizeRemotePath(os, route.mapper.toRemotePath(inputPath, route.aliasPath)))
   const config = manager.snapshot()
   let fallbackReason: string | undefined
 
@@ -122,16 +125,18 @@ export async function openRemoteFile(
 /** VS Code-compatible CLI arguments; each value is passed without a shell. */
 export function editorLaunchArgs(sshTarget: string, remotePath: string): string[] {
   if (/[/\r\n\0]/.test(sshTarget)) throw new Error('SSH Host alias contains unsupported characters')
-  if (!posix.isAbsolute(remotePath)) throw new Error(`remote open path must be absolute: ${remotePath}`)
+  if (!posix.isAbsolute(remotePath) && !/^[A-Za-z]:[\\/]/.test(remotePath) && !remotePath.startsWith('\\\\')) {
+    throw new Error(`remote open path must be absolute: ${remotePath}`)
+  }
   return ['--remote', `ssh-remote+${sshTarget}`, '--reuse-window', remotePath]
 }
 
 /** Preserve a useful extension while preventing cache traversal and Windows device names. */
 export function safeDownloadedName(remotePath: string): string {
-  let name = basename(remotePath).replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/g, '').trim()
-  if (name.length === 0) name = 'remote-file'
+  const name = basename(remotePath.replaceAll('\\', '/')).replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/g, '').trim()
+  if (name.length === 0) return 'remote-file'
   const stem = name.split('.', 1)[0]?.toUpperCase()
-  if (stem !== undefined && /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(stem)) name = `_${name}`
+  if (stem !== undefined && /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(stem)) return `_${name}`
   return name.slice(0, 180)
 }
 

@@ -21,22 +21,12 @@ describe('transparent spill store', () => {
 
   it('writes the complete artifact through the remote AHP connection', async () => {
     const resourceWrite = vi.fn(async () => ({}))
-    const run = vi.fn(async () => ({
-      exitCode: 0,
-      signal: null,
-      timedOut: false,
-      aborted: false,
-      timeoutMs: 30_000,
-      stdout: { text: '', truncated: false },
-      stderr: { text: '', truncated: false },
-    }))
-    const shell = { resolve: vi.fn((spec: unknown) => spec), execute: async (spec: unknown) => ({ result: async () => run(spec) }) }
+    const resourceMkdir = vi.fn(async () => ({}))
     const manager = {
       workspaceContext: vi.fn(async () => ({
-        remote: { runtimeRoot: '/runtime/client', getClient: async () => ({ resourceWrite }) },
+        remote: { runtimeRoot: '/runtime/client', getClient: async () => ({ resourceWrite, resourceMkdir }) },
       })),
-      workspaceShell: vi.fn(async () => shell),
-    } as unknown as Pick<RemoteSshManager, 'workspaceContext' | 'workspaceShell'>
+    } as unknown as Pick<RemoteSshManager, 'workspaceContext'>
     const input = {
       owner: { sessionId: 'session-a' },
       source: { toolName: 'job', callId: 'call-a', label: 'output' },
@@ -46,7 +36,9 @@ describe('transparent spill store', () => {
 
     const saved = await saveRemoteSpill(manager, route, input)
 
-    expect(run).toHaveBeenCalledOnce()
+    expect(resourceMkdir).toHaveBeenCalledWith(expect.objectContaining({
+      uri: 'file:///runtime/client/spills',
+    }))
     expect(resourceWrite).toHaveBeenCalledWith(expect.objectContaining({
       uri: expect.stringMatching(/^file:\/\/\/runtime\/client\/spills\/session-[0-9a-f]{16}\/[0-9a-f]{24}-job_output\.txt$/),
       data: input.content,

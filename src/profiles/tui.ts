@@ -11,6 +11,7 @@ import type {
 import type { RemoteDirectoryListing, RemoteSshManager, RemoteSshServer, RemoteWorkspaceRoute } from '../routing/manager.ts'
 import { discoveredSshServerId } from '../ssh/config.ts'
 import { listAvailableServers } from '../tui/servers.ts'
+import { remotePathKeyAuto, resolveRemotePath, toNativeRemotePath, deriveRemoteOs } from '../transport/remote-paths.ts'
 
 export { listAvailableServers } from '../tui/servers.ts'
 
@@ -54,7 +55,7 @@ function registerTuiProvider(ctx: Context): void {
     commandShell: async cwd => {
       const route = manager.route(undefined, cwd)
       if (route.kind !== 'remote') return undefined
-      return manager.workspaceShell(route, 'bash')
+      return manager.workspaceShell(route, manager.remoteDialect(route))
     },
   }
   const dispose = registry.register(provider)
@@ -111,7 +112,7 @@ function directoryListingResult(
     choose: async () => ({ kind: 'target', target: await ensureWorkspaceTarget(manager, server, listing.path) }),
     input: {
       initialValue: listing.path,
-      placeholder: '/absolute/remote/path',
+      placeholder: '/absolute/path or C:\\Users\\me',
       submit: value => remoteDirectoryChoices(manager, server, value),
     },
   }]
@@ -146,11 +147,11 @@ async function ensureWorkspaceTarget(
     server = await manager.addServer(candidate)
     snapshot = manager.snapshot()
   }
-  const normalizedPath = posix.normalize(remotePath)
+  const normalizedKey = remotePathKeyAuto(remotePath)
   const workspace = snapshot.workspaces.find(current =>
-    current.serverId === server.id && posix.normalize(current.remotePath) === normalizedPath)
+    current.serverId === server.id && remotePathKeyAuto(current.remotePath) === normalizedKey)
   const route = workspace === undefined
-    ? await manager.addWorkspace(server.id, normalizedPath)
+    ? await manager.addWorkspace(server.id, remotePath)
     : manager.workspace(workspace.id)
   return targetForRoute(route)
 }
@@ -174,14 +175,14 @@ export async function resolveSshWorkspaceUri(
     })
   }
   const current = manager.snapshot().workspaces.find(workspace =>
-    workspace.serverId === server.id && posix.normalize(workspace.remotePath) === parsed.remotePath)
+    workspace.serverId === server.id && remotePathKeyAuto(workspace.remotePath) === remotePathKeyAuto(parsed.remotePath))
   const route = current === undefined
     ? await manager.addWorkspace(server.id, parsed.remotePath)
     : manager.workspace(current.id)
   return targetForRoute(route)
 }
 
-/** Resolve a POSIX path relative to the currently selected SSH workspace. */
+/** Resolve a path relative to the currently selected SSH workspace. */
 export async function resolveSshWorkspacePath(
   manager: RemoteSshManager,
   path: string,
@@ -189,17 +190,18 @@ export async function resolveSshWorkspacePath(
 ): Promise<TuiWorkspaceTarget | undefined> {
   const route = manager.route(undefined, cwd)
   if (route.kind !== 'remote') return undefined
+  const os = deriveRemoteOs(route.server.remoteOs, route.workspace.remotePath)
   const currentRemotePath = route.mapper.toRemotePath(cwd, route.aliasPath)
-  const remotePath = posix.resolve(currentRemotePath, path)
+  const remotePath = resolveRemotePath(os, currentRemotePath, path)
   const current = manager.snapshot().workspaces.find(workspace =>
-    workspace.serverId === route.server.id && posix.normalize(workspace.remotePath) === remotePath)
+    workspace.serverId === route.server.id && remotePathKeyAuto(workspace.remotePath) === remotePathKeyAuto(remotePath))
   const targetRoute = current === undefined
     ? await manager.addWorkspace(route.server.id, remotePath)
     : manager.workspace(current.id)
   return targetForRoute(targetRoute)
 }
 
-/** Parse `ssh://[user@]server[:port]/absolute/path`. */
+/** Parse `ssh://[user@]server[:port]/absolute/path` (POSIX `/srv/p` or Windows `/C:/Users/me`). */
 export function parseSshWorkspaceUri(uri: string): ParsedSshWorkspaceUri | undefined {
   let parsed: URL
   try {
@@ -213,7 +215,10 @@ export function parseSshWorkspaceUri(uri: string): ParsedSshWorkspaceUri | undef
   const user = decodeURIComponent(parsed.username)
   const selector = user.length === 0 ? host : `${user}@${host}`
   const sshTarget = selector
-  const remotePath = posix.normalize(decodeURIComponent(parsed.pathname))
+  // WHATWG URLs do not fold backslashes for non-special schemes, so a Windows
+  // spelling typed as `ssh://host/C:\Users\me` must be folded by hand.
+  const rawPath = decodeURIComponent(parsed.pathname).replaceAll('\\', '/')
+  const remotePath = posix.normalize(rawPath)
   if (!posix.isAbsolute(remotePath)) throw new Error('SSH workspace URI requires an absolute remote path')
   const port = parsed.port === '' ? undefined : Number(parsed.port)
   if (port !== undefined && (!Number.isSafeInteger(port) || port <= 0 || port > 65535)) {
@@ -236,12 +241,13 @@ export function sshWorkspaceUri(route: RemoteWorkspaceRoute): string {
 }
 
 function targetForRoute(route: RemoteWorkspaceRoute): TuiWorkspaceTarget {
+  const os = deriveRemoteOs(route.server.remoteOs, route.workspace.remotePath)
   const root = posix.normalize(route.workspace.remotePath)
   return {
     uri: sshWorkspaceUri(route),
     cwd: route.aliasPath,
     label: route.workspace.title ?? `${route.server.label} > ${posix.basename(root) || root}`,
-    description: root,
+    description: toNativeRemotePath(os, root),
     kind: 'provider',
     badge: 'SSH',
   }

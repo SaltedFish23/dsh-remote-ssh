@@ -29,7 +29,9 @@ Host tunnel 则通过 [dsh-host](https://github.com/Yan-Zero/dsh-host) 让任意
 - 在可选 Web 反向代理之外，独立导出转发后的 Host endpoint 与类型化 Node API client；
 - 删除远端映射后保留可阅读的 Workspace 与 Session 历史，但旧会话不能继续调用工具。
 
-远端工作区目前支持 POSIX/Linux 主机，尚未支持 Windows SSH 主机。
+远端工作区支持 POSIX/Linux 主机与 Windows 10/11 主机。Windows 远端上的 shell 工具为 `pwsh`（无 pwsh 7 时回退到 Windows PowerShell）；
+所有引导命令都经 `powershell -EncodedCommand` 包装执行，对任意 OpenSSH DefaultShell 免疫；
+远端路径以原生 Windows 形式呈现（`C:\Users\me\project`，同时也接受 `/C:/Users/me/project` 写法）。
 
 ## 安装
 
@@ -95,8 +97,8 @@ Codex、Claude Code 及其他自动化 Agent 应直接遵循 [INSTALL.md](INSTAL
 
 远端主机需要：
 
-- POSIX shell，以及可非交互使用的 OpenSSH 连接；
-- 用于 shell 和子进程执行的 `bash`、`base64` 与 `mkfifo`；
+- POSIX shell 与可非交互使用的 OpenSSH 连接，或装有 OpenSSH Server 的 Windows 10/11（DefaultShell 任意均可）；
+- POSIX 远端需要 `bash`、`base64` 与 `mkfifo`；Windows 远端只需系统自带的 Windows PowerShell（交互式子进程 stdin 改用命名管道，无需 `mkfifo`）；
 - 为 glob 和 grep 工具提供的 `rg`；
 - 由官方 VS Code CLI 或已有 VS Code Server 提供的 VS Code Agent Host。
 
@@ -123,7 +125,7 @@ Codex、Claude Code 及其他自动化 Agent 应直接遵循 [INSTALL.md](INSTAL
 
 当前工作区就是执行边界。远端会话中的绝对路径、可执行文件、shell 状态和搜索工具都在对应 SSH 主机上解析；即使本机存在同名文件或命令，也不会混用。
 
-远端文件系统结果只显示 POSIX 路径。本机 Workspace 身份目录不会作为文件路径展示给模型，也不会经由联动插件输出。
+远端文件系统结果只显示远端原生路径（POSIX 为 `/…`，Windows 为 `C:\…`）。本机 Workspace 身份目录不会作为文件路径展示给模型，也不会经由联动插件输出。
 
 工具结果超过内联上限时，远端会话的完整结果通过 AHP 写入该 SSH 主机的私有 runtime 目录，提示中的 locator 也是远端 POSIX 路径。本机 spill 后端仅供本机会话使用；未知或失效的会话不会回退到本机保存。`glob`/`grep` 的结果也会在官方工具执行后校正到远端 POSIX 路径，避免 Windows 宿主把 `/root/...` 显示成 `E:\root\...`。
 
@@ -153,7 +155,7 @@ Web UI 不桥接密码、MFA 和首次 host-key 确认。请先通过 OpenSSH �
 ## 兼容性
 
 - DeepSeek Harness `0.1.0-rc.6` package surface；
-- POSIX/Linux SSH 主机；
+- POSIX/Linux 与 Windows 10/11 SSH 主机；
 - `@microsoft/agent-host-protocol` 0.7 客户端，并已针对 AHP 0.8 验证 Resource 与 Terminal 子集；
 - 系统 OpenSSH 配置、SSH Agent、`known_hosts` 和 `ProxyJump`。
 - 使用原生远端文件打开方式时，本机需要装有 Visual Studio Code、Cursor、Windsurf 或 VSCodium，以及兼容的 Remote SSH 扩展。

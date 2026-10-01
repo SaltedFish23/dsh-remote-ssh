@@ -30,7 +30,11 @@ Choose `LOCAL > project` and ordinary file, search, shell, and background-task t
 - exports the forwarded Host endpoint and a typed Node API client independently of the optional Web reverse proxy;
 - preserves readable Workspace and Session history after a remote mapping is removed, while rejecting new tool calls from the old session.
 
-Remote workspaces currently support POSIX/Linux hosts. Windows SSH hosts are not yet supported.
+Remote workspaces support POSIX/Linux hosts and Windows 10/11 hosts. On a Windows
+remote the shell tool is `pwsh` (falling back to Windows PowerShell), every
+bootstrap command runs through a `powershell -EncodedCommand` wrapper that
+survives any OpenSSH DefaultShell, and remote paths are presented in native
+Windows form (`C:\Users\me\project`; `/C:/Users/me/project` is accepted too).
 
 ## Install
 
@@ -102,8 +106,9 @@ Remote file links use the first supported VS Code-compatible editor by default. 
 
 The remote host needs:
 
-- a POSIX shell and non-interactive OpenSSH access;
-- `bash`, `base64`, and `mkfifo` for shell and subprocess execution;
+- a POSIX shell and non-interactive OpenSSH access, or Windows 10/11 with OpenSSH Server (either DefaultShell works);
+- POSIX remotes: `bash`, `base64`, and `mkfifo` for shell and subprocess execution;
+  Windows remotes need nothing beyond in-box Windows PowerShell (live subprocess stdin streams over named pipes instead of `mkfifo`);
 - `rg` for glob and grep tools;
 - a VS Code Agent Host supplied by the official VS Code CLI or an existing VS Code Server installation.
 

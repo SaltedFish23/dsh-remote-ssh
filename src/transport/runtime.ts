@@ -9,6 +9,14 @@ import { WebSocketTransport } from '@microsoft/agent-host-protocol/ws'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { ahpProtocolMismatch, DSH_AHP_PROTOCOL_VERSIONS, formatAhpProtocolMismatch } from './ahp-compat.ts'
+import {
+  looksLikeWindowsNativePath,
+  normalizeRemotePath,
+  remoteRootOf,
+  resolveRemotePath,
+  type RemoteOs,
+} from './remote-paths.ts'
+import { powerShellCommand, quotePowerShell } from './powershell.ts'
 
 export interface Config {
   sshTarget: string
@@ -19,6 +27,8 @@ export interface Config {
   sshArgs?: string[]
   remoteCodeCommand?: string
   remoteRuntimeRoot?: string
+  /** OS family of the remote host; selects bootstrap and path dialects. */
+  remoteOs?: RemoteOs
   startupTimeoutMs?: number
   requestTimeoutMs?: number
   heartbeatIntervalMs?: number
@@ -33,7 +43,8 @@ interface ResolvedConfig extends Config {
   sshExecutable: string
   sshArgs: string[]
   remoteCodeCommand: string
-  remoteRuntimeRoot: string
+  remoteRuntimeRoot?: string
+  remoteOs: RemoteOs
   startupTimeoutMs: number
   requestTimeoutMs: number
   heartbeatIntervalMs: number
@@ -73,7 +84,17 @@ export function quotePosix(value: string): string {
 }
 
 /** Build the POSIX bootstrap that resolves the VS Code CLI and starts Agent Host. */
-export function buildRemoteAgentHostCommand(remoteCodeCommand: string): string {
+export function buildRemoteAgentHostCommand(remoteCodeCommand: string, os: RemoteOs = 'posix'): string {
+  if (os === 'windows') {
+    const script = [
+      `$dsh_code = ${quotePowerShell(remoteCodeCommand)}`,
+      'if ($dsh_code -eq \'code\' -and -not (Get-Command $dsh_code -ErrorAction SilentlyContinue) -and (Test-Path "$HOME\\.dsh-remote-ssh\\cli\\bin\\code.cmd")) { $dsh_code = "$HOME\\.dsh-remote-ssh\\cli\\bin\\code.cmd" }',
+      'if (-not (Get-Command $dsh_code -ErrorAction SilentlyContinue)) { [Console]::Error.WriteLine("dsh-remote-ssh: VS Code CLI not found: $dsh_code"); exit 127 }',
+      '& $dsh_code agent host --host 127.0.0.1 --port 0 --idle-timeout 60 --server-data-dir "$HOME\\.dsh-remote-ssh\\server" --cli-data-dir "$HOME\\.dsh-remote-ssh\\cli" --verbose',
+      'exit $LASTEXITCODE',
+    ].join('\n')
+    return powerShellCommand(script)
+  }
   const requested = quotePosix(remoteCodeCommand)
   return [
     `dsh_code=${requested}`,
@@ -84,7 +105,13 @@ export function buildRemoteAgentHostCommand(remoteCodeCommand: string): string {
 }
 
 /** List installed VS Code Server entrypoints newest-first for compatibility probing. */
-export function buildListEmbeddedAgentHostsCommand(): string {
+export function buildListEmbeddedAgentHostsCommand(os: RemoteOs = 'posix'): string {
+  if (os === 'windows') {
+    return powerShellCommand([
+      'Get-ChildItem -Path "$HOME\\.vscode-server\\cli\\servers" -Recurse -File -Filter \'code-server*\' -ErrorAction SilentlyContinue',
+      '  | Sort-Object LastWriteTime -Descending | ForEach-Object { $_.FullName }',
+    ].join('\n'))
+  }
   return 'find "$HOME/.vscode-server/cli/servers" -type f -path \'*/server/bin/code-server\' -perm -u+x -printf \'%T@ %p\\n\' 2>/dev/null | sort -nr | cut -d \' \' -f 2-'
 }
 
@@ -116,8 +143,19 @@ export function buildSshCommandArgs(
 }
 
 /** Build the fallback bootstrap for a VS Code Server installation left by Remote - SSH. */
-export function buildEmbeddedAgentHostCommand(codeServerPath?: string, instanceId = 'default'): string {
+export function buildEmbeddedAgentHostCommand(codeServerPath?: string, instanceId = 'default', os: RemoteOs = 'posix'): string {
   if (!/^[a-zA-Z0-9._-]+$/.test(instanceId)) throw new Error(`invalid embedded Agent Host instance id: ${instanceId}`)
+  if (os === 'windows') {
+    const script = [
+      codeServerPath === undefined
+        ? '$dsh_code_server = @(Get-ChildItem -Path "$HOME\\.vscode-server\\cli\\servers" -Recurse -File -Filter \'code-server*\' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)[0].FullName'
+        : `$dsh_code_server = ${quotePowerShell(codeServerPath)}`,
+      'if ([string]::IsNullOrEmpty($dsh_code_server)) { [Console]::Error.WriteLine(\'dsh-remote-ssh: no usable code agent host or VS Code Server code-server found\'); exit 127 }',
+      `& $dsh_code_server --host 127.0.0.1 --port 0 --agent-host-port 0 --accept-server-license-terms --enable-remote-auto-shutdown --server-data-dir "$HOME\\.dsh-remote-ssh\\server-embedded\\${instanceId}" --log info`,
+      'exit $LASTEXITCODE',
+    ].join('\n')
+    return powerShellCommand(script)
+  }
   const resolveCodeServer = codeServerPath === undefined
     ? `dsh_code_server=$(${buildListEmbeddedAgentHostsCommand()} | head -n 1)`
     : `dsh_code_server=${quotePosix(codeServerPath)}`
@@ -134,10 +172,21 @@ export function buildEmbeddedAgentHostCommand(codeServerPath?: string, instanceI
  * data directory, so no other session (another DSH instance, a concurrent
  * reconnect generation) can be hit. The bracketed first character keeps the
  * ERE from matching this kill command's own command line, which would
- * otherwise terminate the very SSH session running it.
+ * otherwise terminate the very SSH session running it. The Windows reap is
+ * naturally self-excluding: its pattern only exists inside the encoded
+ * command payload, never on any process command line in plaintext.
  */
-export function buildReapEmbeddedAgentHostCommand(instanceId: string): string {
+export function buildReapEmbeddedAgentHostCommand(instanceId: string, os: RemoteOs = 'posix'): string {
   if (!/^[a-zA-Z0-9._-]+$/.test(instanceId)) throw new Error(`invalid embedded Agent Host instance id: ${instanceId}`)
+  if (os === 'windows') {
+    const pattern = `server-embedded[/\\\\]${instanceId.replaceAll('.', '\\.')}`
+    return powerShellCommand([
+      'Get-CimInstance Win32_Process -ErrorAction SilentlyContinue',
+      `  | Where-Object { $_.CommandLine -match ${quotePowerShell(pattern)} }`,
+      '  | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }',
+      'exit 0',
+    ].join('\n'))
+  }
   const pattern = `[s]erver-embedded/${instanceId.replaceAll('.', '\\.')}`
   return `pkill -f -- ${quotePosix(pattern)}`
 }
@@ -160,19 +209,21 @@ export function posixPathFromFileUri(uri: string): string {
 export class WorkspacePathMapper {
   readonly localWorkspace: string
   readonly remoteWorkspace: string
+  readonly remoteOs: RemoteOs
 
-  constructor(localWorkspace: string, remoteWorkspace: string) {
+  constructor(localWorkspace: string, remoteWorkspace: string, remoteOs: RemoteOs = 'posix') {
     this.localWorkspace = resolve(localWorkspace)
-    this.remoteWorkspace = posix.normalize(remoteWorkspace)
+    this.remoteOs = remoteOs
+    this.remoteWorkspace = normalizeRemotePath(remoteOs, remoteWorkspace)
     if (!isAbsolute(this.localWorkspace)) throw new Error('localWorkspace must be an absolute local path')
-    if (!posix.isAbsolute(this.remoteWorkspace)) {
-      throw new Error(`remoteWorkspace must be an absolute POSIX path: ${remoteWorkspace}`)
+    if (!posix.isAbsolute(this.remoteWorkspace) || (remoteOs === 'posix' && looksLikeWindowsNativePath(remoteWorkspace))) {
+      throw new Error(`remoteWorkspace must be an absolute ${remoteOs === 'windows' ? 'Windows' : 'POSIX'} path: ${remoteWorkspace}`)
     }
   }
 
   toRemotePath(input: string, cwd?: string): string {
     if (input.trim().length === 0) throw new Error('path must be a non-empty string')
-    if (input.startsWith('file:')) return posixPathFromFileUri(input)
+    if (input.startsWith('file:')) return normalizeRemotePath(this.remoteOs, posixPathFromFileUri(input))
 
     const localAbsolute = isAbsolute(input)
     if (localAbsolute) {
@@ -182,15 +233,25 @@ export class WorkspacePathMapper {
       }
       // On POSIX, local and remote absolute paths share the same syntax. Paths
       // outside the alias are therefore remote; Windows local paths remain
-      // distinguishable and must not escape the alias.
+      // distinguishable and must not escape the alias. A Windows remote
+      // extends the shared-syntax passthrough to its own `/C:/…` form and to
+      // native drive spellings alike.
+      if (this.remoteOs === 'windows') {
+        if (looksLikeWindowsNativePath(input) || input.startsWith('/')) return normalizeRemotePath(this.remoteOs, input)
+        throw new Error(`local path is outside the Remote SSH workspace alias: ${input}`)
+      }
       if (input.startsWith('/')) return posix.normalize(input)
       throw new Error(`local path is outside the Remote SSH workspace alias: ${input}`)
     }
 
-    if (input.startsWith('/')) return posix.normalize(input)
+    if (this.remoteOs === 'windows' && looksLikeWindowsNativePath(input)) return normalizeRemotePath(this.remoteOs, input)
+    if (input.startsWith('/')) return normalizeRemotePath(this.remoteOs, input)
 
     const base = cwd === undefined ? this.remoteWorkspace : this.toRemotePath(cwd)
-    return posix.resolve(base, input.replaceAll('\\', '/'))
+    // POSIX remotes keep the historic backslash fold for relative inputs.
+    return this.remoteOs === 'posix'
+      ? posix.resolve(base, input.replaceAll('\\', '/'))
+      : resolveRemotePath(this.remoteOs, base, input)
   }
 
 }
@@ -210,7 +271,8 @@ export class RemoteSshRuntime extends Service {
     sshExecutable: z.string().default('ssh'),
     sshArgs: z.array(z.string()).default([]),
     remoteCodeCommand: z.string().default('code'),
-    remoteRuntimeRoot: z.string().default('/tmp/dsh-remote-ssh'),
+    remoteRuntimeRoot: z.string(),
+    remoteOs: z.union(['posix', 'windows'] as const).default('posix'),
     startupTimeoutMs: z.number().default(600_000),
     requestTimeoutMs: z.number().default(30_000),
     heartbeatIntervalMs: z.number().default(30_000),
@@ -224,8 +286,12 @@ export class RemoteSshRuntime extends Service {
   readonly mapper: WorkspacePathMapper | undefined
   readonly config: ResolvedConfig
   readonly clientId = `dsh-remote-ssh-${randomUUID()}`
-  readonly runtimeRoot: string
-  readonly remoteAccessRoot: string
+  /** OS family driving every remote command and path dialect. */
+  readonly remoteOs: RemoteOs
+  /** Backing of {@link runtimeRoot}; deferred on Windows until first connect. */
+  private runtimeRootValue: string | undefined
+  /** Backing of {@link remoteAccessRoot}; deferred on Windows until first connect. */
+  private accessRootValue: string | undefined
 
   /**
    * The current connection attempt. Replaced whenever the Agent Host link is
@@ -266,14 +332,29 @@ export class RemoteSshRuntime extends Service {
   constructor(ctx: Context, config: Config) {
     super(ctx, 'remoteSsh')
     this.config = config as ResolvedConfig
+    this.remoteOs = config.remoteOs ?? 'posix'
     if ((config.localWorkspace === undefined) !== (config.remoteWorkspace === undefined)) {
       throw new Error('dsh-remote-ssh: localWorkspace and remoteWorkspace must be configured together')
     }
     this.mapper = config.localWorkspace === undefined || config.remoteWorkspace === undefined
       ? undefined
-      : new WorkspacePathMapper(config.localWorkspace, config.remoteWorkspace)
-    this.remoteAccessRoot = posix.normalize(config.remoteAccessRoot ?? config.remoteWorkspace ?? '/')
-    this.runtimeRoot = posix.join(this.config.remoteRuntimeRoot, this.clientId)
+      : new WorkspacePathMapper(config.localWorkspace, config.remoteWorkspace, this.remoteOs)
+    const configuredRuntimeRoot = config.remoteRuntimeRoot
+      ?? (this.remoteOs === 'posix' ? '/tmp/dsh-remote-ssh' : undefined)
+    if (configuredRuntimeRoot !== undefined) {
+      this.runtimeRootValue = posix.join(normalizeRemotePath(this.remoteOs, configuredRuntimeRoot), this.clientId)
+    }
+    if (config.remoteAccessRoot !== undefined) {
+      this.accessRootValue = normalizeRemotePath(this.remoteOs, config.remoteAccessRoot)
+    } else if (config.remoteWorkspace !== undefined) {
+      // POSIX keeps the historic workspace-scoped default; a Windows remote
+      // has no single root tree, so it defaults to the workspace's drive.
+      this.accessRootValue = this.remoteOs === 'posix'
+        ? posix.normalize(config.remoteWorkspace)
+        : remoteRootOf('windows', normalizeRemotePath('windows', config.remoteWorkspace))
+    } else if (this.remoteOs === 'posix') {
+      this.accessRootValue = '/'
+    }
     this.validate()
     if (this.mapper !== undefined) mkdirSync(this.mapper.localWorkspace, { recursive: true })
     this.begin()
@@ -297,6 +378,26 @@ export class RemoteSshRuntime extends Service {
         await this.discardEmbeddedAgentHost()
       }
     }, 'Remote SSH AHP teardown')
+  }
+
+  /**
+   * Private staging root on the remote (internal canonical form). On a
+   * Windows remote without an explicitly configured root it is derived from
+   * the Agent Host's reported home directory at first connect.
+   */
+  get runtimeRoot(): string {
+    if (this.runtimeRootValue === undefined) {
+      throw new Error('dsh-remote-ssh: remoteRuntimeRoot resolves after the Windows Agent Host link is established')
+    }
+    return this.runtimeRootValue
+  }
+
+  /** Filesystem root this runtime requests access to (internal form). */
+  get remoteAccessRoot(): string {
+    if (this.accessRootValue === undefined) {
+      throw new Error('dsh-remote-ssh: remoteAccessRoot resolves after the Windows Agent Host link is established')
+    }
+    return this.accessRootValue
   }
 
   /**
@@ -449,7 +550,7 @@ export class RemoteSshRuntime extends Service {
   protected reapEmbeddedAgentHost(instanceId: string): Promise<void> {
     return runCaptured(
       this.config.sshExecutable,
-      buildSshCommandArgs(this.config.sshArgs, this.config.sshTarget, buildReapEmbeddedAgentHostCommand(instanceId)),
+      buildSshCommandArgs(this.config.sshArgs, this.config.sshTarget, buildReapEmbeddedAgentHostCommand(instanceId, this.remoteOs)),
       Math.min(this.config.startupTimeoutMs, EMBEDDED_REAP_TIMEOUT_MS),
     ).then(() => undefined, () => undefined)
   }
@@ -577,8 +678,12 @@ export class RemoteSshRuntime extends Service {
     }
     if (sshExecutable.trim().length === 0) throw new Error('dsh-remote-ssh: sshExecutable must be non-empty')
     if (remoteCodeCommand.trim().length === 0) throw new Error('dsh-remote-ssh: remoteCodeCommand must be non-empty')
-    if (!posix.isAbsolute(remoteRuntimeRoot)) throw new Error('dsh-remote-ssh: remoteRuntimeRoot must be an absolute POSIX path')
-    if (!posix.isAbsolute(this.remoteAccessRoot)) throw new Error('dsh-remote-ssh: remoteAccessRoot must be an absolute POSIX path')
+    if (remoteRuntimeRoot !== undefined && !posix.isAbsolute(normalizeRemotePath(this.remoteOs, remoteRuntimeRoot))) {
+      throw new Error(`dsh-remote-ssh: remoteRuntimeRoot must be an absolute ${this.remoteOs === 'windows' ? 'Windows' : 'POSIX'} path`)
+    }
+    if (this.accessRootValue !== undefined && !posix.isAbsolute(this.accessRootValue)) {
+      throw new Error(`dsh-remote-ssh: remoteAccessRoot must be an absolute ${this.remoteOs === 'windows' ? 'Windows' : 'POSIX'} path`)
+    }
     if (!Number.isSafeInteger(startupTimeoutMs) || startupTimeoutMs <= 0) {
       throw new Error('dsh-remote-ssh: startupTimeoutMs must be a positive integer')
     }
@@ -623,10 +728,20 @@ export class RemoteSshRuntime extends Service {
         protocolVersions: this.config.protocolVersions,
         initialSubscriptions: ['ahp-root://'],
       })
+      if (this.runtimeRootValue === undefined || this.accessRootValue === undefined) {
+        // A Windows remote without explicitly configured roots derives its
+        // private staging tree from the reported home directory.
+        if (initialized.defaultDirectory === undefined) {
+          throw new Error('dsh-remote-ssh: the Windows Agent Host reported no default directory; configure remoteRuntimeRoot and remoteAccessRoot explicitly')
+        }
+        const home = normalizeRemotePath(this.remoteOs, posixPathFromFileUri(String(initialized.defaultDirectory)))
+        this.accessRootValue ??= remoteRootOf(this.remoteOs, home)
+        this.runtimeRootValue ??= posix.join(home, '.dsh-remote-ssh', this.clientId)
+      }
       const remoteUri = fileUriFromPosixPath(this.remoteAccessRoot)
       await client.resourceRequest({ uri: remoteUri, read: true, write: true })
       const runtimeUri = fileUriFromPosixPath(this.runtimeRoot)
-      await client.resourceRequest({ uri: fileUriFromPosixPath(this.config.remoteRuntimeRoot), read: true, write: true })
+      await client.resourceRequest({ uri: fileUriFromPosixPath(posix.dirname(this.runtimeRoot)), read: true, write: true })
       await client.resourceMkdir({ uri: runtimeUri })
       return {
         client,
@@ -641,7 +756,7 @@ export class RemoteSshRuntime extends Service {
 
   private async openOverSsh(): Promise<AhpConnection> {
     const diagnostics: string[] = []
-    const startupCommand = buildRemoteAgentHostCommand(this.config.remoteCodeCommand)
+    const startupCommand = buildRemoteAgentHostCommand(this.config.remoteCodeCommand, this.remoteOs)
     let startup: CapturedProcess
     try {
       startup = await runCaptured(
@@ -697,7 +812,7 @@ export class RemoteSshRuntime extends Service {
   private async listEmbeddedAgentHosts(): Promise<string[]> {
     const result = await runCaptured(
       this.config.sshExecutable,
-      buildSshCommandArgs(this.config.sshArgs, this.config.sshTarget, buildListEmbeddedAgentHostsCommand()),
+      buildSshCommandArgs(this.config.sshArgs, this.config.sshTarget, buildListEmbeddedAgentHostsCommand(this.remoteOs)),
       Math.min(this.config.startupTimeoutMs, 30_000),
     )
     if (result.exitCode !== 0) return []
@@ -709,7 +824,7 @@ export class RemoteSshRuntime extends Service {
     const child = spawn(this.config.sshExecutable, buildSshCommandArgs(
       this.config.sshArgs,
       this.config.sshTarget,
-      buildEmbeddedAgentHostCommand(codeServerPath, instanceId),
+      buildEmbeddedAgentHostCommand(codeServerPath, instanceId, this.remoteOs),
     ), { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
     this.embeddedAgentHost = child
     this.embeddedInstanceId = instanceId
@@ -734,7 +849,9 @@ export class RemoteSshRuntime extends Service {
       buildSshCommandArgs(
         this.config.sshArgs,
         this.config.sshTarget,
-        `cat "$HOME/.dsh-remote-ssh/server-embedded/${instanceId}/data/token"`,
+        this.remoteOs === 'windows'
+          ? powerShellCommand(`[Console]::Out.Write([System.IO.File]::ReadAllText("$HOME\\.dsh-remote-ssh\\server-embedded\\${instanceId}\\data\\token"))`)
+          : `cat "$HOME/.dsh-remote-ssh/server-embedded/${instanceId}/data/token"`,
       ),
       Math.min(this.config.startupTimeoutMs, 30_000),
     )

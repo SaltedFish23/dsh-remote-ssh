@@ -12,7 +12,7 @@ export function resolveRemoteOpenWorkspace(
   const current = bestMatch(workspaces, cwd, workspace => workspace.aliasPath, localContains)
     ?? bestMatch(workspaces, cwd, workspace => workspace.remotePath, posixContains)
   if (current === undefined) return undefined
-  return path.startsWith('/') || localContains(current.aliasPath, path) ? current : undefined
+  return /^(?:[A-Za-z]:[\\/]|\/)/.test(path) || localContains(current.aliasPath, path) ? current : undefined
 }
 
 function bestMatch(
@@ -51,8 +51,11 @@ function posixContains(root: string, path: string): boolean {
 }
 
 function normalizePosix(path: string): string {
+  const folded = path.replaceAll('\\', '/')
+  const driven = /^([A-Za-z]):/.test(folded) ? `/${folded[0]!.toUpperCase()}${folded.slice(1)}` : folded
+  const lower = /^\/[A-Za-z]:/.test(driven) || driven.startsWith('//') ? driven.toLowerCase() : driven
   const parts: string[] = []
-  for (const part of path.split('/')) {
+  for (const part of lower.split('/')) {
     if (part === '' || part === '.') continue
     if (part === '..') parts.pop()
     else parts.push(part)

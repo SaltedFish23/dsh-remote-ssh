@@ -95,8 +95,14 @@ function registerWebRoutes(ctx: Context): void {
     route(ctx, REMOTE_SSH_WORKSPACE_PATH, 'POST', async (req, res) => {
       const body = await readJson(req)
       const server = await resolveAvailableServer(ctx.remoteSshManager, requiredString(body, 'serverId'))
+      const remoteOs = parseRemoteOs(body.remoteOs)
       const configured = ctx.remoteSshManager.snapshot().servers.find(candidate => candidate.id === server.id)
-        ?? await ctx.remoteSshManager.addServer({ id: server.id, label: server.label, sshTarget: server.sshTarget })
+        ?? await ctx.remoteSshManager.addServer({
+          id: server.id,
+          label: server.label,
+          sshTarget: server.sshTarget,
+          ...(remoteOs === undefined ? {} : { remoteOs }),
+        })
       const created = await ctx.remoteSshManager.addWorkspace(configured.id, requiredString(body, 'remotePath'))
       json(res, 201, { id: created.workspace.id, aliasPath: created.aliasPath })
     }),
@@ -237,6 +243,12 @@ function parseOpenFileMode(value: unknown): RemoteOpenFileMode {
   throw new Error('openFileMode is invalid')
 }
 
+function parseRemoteOs(value: unknown): 'posix' | 'windows' | undefined {
+  if (value === undefined || value === null || value === '') return undefined
+  if (value === 'posix' || value === 'windows') return value
+  throw new Error('remoteOs must be "posix" or "windows"')
+}
+
 function trustedRequest(req: IncomingMessage): boolean {
   if (req.headers['sec-fetch-site'] === 'cross-site') return false
   const host = req.headers.host
@@ -261,10 +273,46 @@ function safeMessage(error: unknown): string {
 async function probeServer(sshTarget: string, sshArgs: string[]): Promise<{
   reachable: boolean
   hostname?: string
+  os?: 'posix' | 'windows'
   commands?: Record<string, boolean>
   error?: string
 }> {
-  const command = 'printf "hostname=%s\\n" "$(hostname)"; for dsh_cmd in bash pwsh rg code; do if command -v "$dsh_cmd" >/dev/null 2>&1; then printf "%s=1\\n" "$dsh_cmd"; else printf "%s=0\\n" "$dsh_cmd"; fi; done'
+  // Stage one keeps the fast POSIX path; a Windows sshd (cmd or powershell
+  // DefaultShell) cannot run it, so stage two re-probes through an explicit
+  // Windows PowerShell invocation that works under any default shell.
+  const posix = await runProbe(sshTarget, sshArgs, buildPosixProbeCommand())
+  if (posix !== undefined && posix.hostname !== undefined) return { reachable: true, ...posix }
+  const windows = await runProbe(sshTarget, sshArgs, buildWindowsProbeCommand())
+  if (windows !== undefined && windows.hostname !== undefined) return { reachable: true, ...windows }
+  if (posix !== undefined) return { reachable: false, ...(posix.error === undefined ? {} : { error: posix.error }) }
+  return { reachable: false, ...(windows?.error === undefined ? {} : { error: windows.error }) }
+}
+
+/** Facts command for POSIX remotes: hostname, OS, and tool availability. */
+export function buildPosixProbeCommand(): string {
+  return 'printf "hostname=%s\\n" "$(hostname)"; printf "os=%s\\n" "$(uname -s 2>/dev/null || echo POSIX)"; for dsh_cmd in bash pwsh rg code; do if command -v "$dsh_cmd" >/dev/null 2>&1; then printf "%s=1\\n" "$dsh_cmd"; else printf "%s=0\\n" "$dsh_cmd"; fi; done'
+}
+
+/** Facts command for Windows remotes, encoded to survive any DefaultShell. */
+export function buildWindowsProbeCommand(): string {
+  const script = [
+    'Write-Output ("hostname=" + $env:COMPUTERNAME)',
+    'Write-Output "os=Windows_NT"',
+    "foreach ($dsh_cmd in @('pwsh','powershell','rg','code','bash')) {",
+    '  $found = [bool](Get-Command $dsh_cmd -ErrorAction SilentlyContinue)',
+    '  Write-Output ("{0}={1}" -f $dsh_cmd, [int]$found)',
+    '}',
+  ].join('\n')
+  return `powershell -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, 'utf16le').toString('base64')}`
+}
+
+/** Run one probe command and parse `key=value` facts; undefined means SSH failed. */
+async function runProbe(sshTarget: string, sshArgs: string[], command: string): Promise<{
+  hostname?: string
+  os?: 'posix' | 'windows'
+  commands?: Record<string, boolean>
+  error?: string
+} | undefined> {
   const child = spawn('ssh', [...sshArgs, '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', sshTarget, command], {
     windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -277,12 +325,13 @@ async function probeServer(sshTarget: string, sshArgs: string[]): Promise<{
     child.once('error', reject)
     child.once('close', resolvePromise)
   }).finally(() => { clearTimeout(timer) })
-  const output = Buffer.concat(stdout).toString('utf8')
-  if (code !== 0) return { reachable: false, error: Buffer.concat(stderr).toString('utf8').trim().slice(0, 500) || `ssh exit ${code}` }
-  const facts = Object.fromEntries(output.trim().split(/\r?\n/).map(line => line.split('=', 2) as [string, string]))
+  if (code !== 0) {
+    return { error: Buffer.concat(stderr).toString('utf8').trim().slice(0, 500) || `ssh exit ${code}` }
+  }
+  const facts = Object.fromEntries(Buffer.concat(stdout).toString('utf8').trim().split(/\r?\n/).map(line => line.split('=', 2) as [string, string]))
   return {
-    reachable: true,
     ...(facts.hostname === undefined ? {} : { hostname: facts.hostname }),
-    commands: Object.fromEntries(['bash', 'pwsh', 'rg', 'code'].map(name => [name, facts[name] === '1'])),
+    ...(facts.os === 'Windows_NT' ? { os: 'windows' as const } : facts.os !== undefined ? { os: 'posix' as const } : {}),
+    commands: Object.fromEntries(['bash', 'pwsh', 'powershell', 'rg', 'code'].map(name => [name, facts[name] === '1'])),
   }
 }

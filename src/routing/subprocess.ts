@@ -24,7 +24,15 @@ import type {
   SubprocessTerminalSpawnSpec,
 } from '@deepseek-ai/dsh-subprocess'
 import type { RemoteSshManager, RemoteWorkspaceRoute } from './manager.ts'
+import { routeRemoteOs } from './manager.ts'
 import { fileUriFromPosixPath, quotePosix } from '../transport/runtime.ts'
+import { normalizeRemotePath, toNativeRemotePath, type RemoteOs } from '../transport/remote-paths.ts'
+import {
+  buildPowerShellInteractiveScript,
+  buildPowerShellProcessScript,
+  buildPowerShellStdinWriterScript,
+  powerShellCommand,
+} from '../transport/powershell.ts'
 
 /** Subprocess router that selects the host from `spec.cwd`, never tool identity. */
 export class TransparentSubprocessRuntime extends SubprocessRuntime {
@@ -66,7 +74,7 @@ export class TransparentSubprocessRuntime extends SubprocessRuntime {
     const handle = new RemoteAhpProcessHandle(
       route,
       this.manager.workspaceContext(route),
-      this.manager.workspaceShell(route, 'bash'),
+      this.manager.workspaceShell(route, this.manager.remoteDialect(route)),
       spec,
     )
     this.remoteHandles.add(handle)
@@ -159,11 +167,13 @@ class RemoteAhpProcessHandle implements SubprocessHandle {
     const stdinMode = this.spec.stdio.stdin
     const [{ remote }, shell] = await Promise.all([this.workspace, this.shell])
     const client = await remote.getClient()
+    const os = routeRemoteOs(this.route)
     const token = randomUUID()
     const stdoutPath = `${remote.runtimeRoot}/process-${token}.stdout`
     const stderrPath = `${remote.runtimeRoot}/process-${token}.stderr`
     const stdinPath = `${remote.runtimeRoot}/process-${token}.stdin`
     const fifoPath = `${remote.runtimeRoot}/process-${token}.fifo`
+    const pipeName = `dsh-ssh-${token.replaceAll('-', '')}`
     const stdoutUri = fileUriFromPosixPath(stdoutPath)
     const stderrUri = fileUriFromPosixPath(stderrPath)
     const stdinUri = fileUriFromPosixPath(stdinPath)
@@ -184,7 +194,7 @@ class RemoteAhpProcessHandle implements SubprocessHandle {
               encoding: 'base64' as ContentEncoding,
             }),
       ])
-      if (stdinMode === 'pipe') {
+      if (stdinMode === 'pipe' && os === 'posix') {
         const prepared = await (await shell.execute(shell.resolve({
           command: `rm -f -- ${quotePosix(fifoPath)} && mkfifo -- ${quotePosix(fifoPath)}`,
           workdir: this.spec.cwd,
@@ -196,8 +206,11 @@ class RemoteAhpProcessHandle implements SubprocessHandle {
           throw new Error(`dsh-remote-ssh: failed to create remote stdin FIFO (exit ${prepared.exitCode ?? prepared.signal})`)
         }
       }
-      const inputPath = stdinMode === 'ignore' ? '/dev/null' : stdinMode === 'pipe' ? fifoPath : stdinPath
-      const command = buildRemoteProcessCommand(this.spec.argv, this.spec.env, inputPath, stdoutPath, stderrPath)
+      const stdin: { kind: 'eof' } | { kind: 'file'; path: string } | { kind: 'pipe'; name: string } =
+        stdinMode === 'ignore' ? { kind: 'eof' }
+          : stdinMode === 'pipe' ? { kind: 'pipe', name: pipeName }
+            : { kind: 'file', path: stdinPath }
+      const command = buildRemoteProcessCommand(this.spec.argv, this.spec.env, stdin, stdoutPath, stderrPath, os)
       const resolved = shell.resolve({
         command,
         workdir: this.spec.cwd,
@@ -208,7 +221,10 @@ class RemoteAhpProcessHandle implements SubprocessHandle {
       if (stdinMode === 'pipe') {
         const endMarker = `__DSH_STDIN_EOF_${randomUUID().replaceAll('-', '')}__`
         writer = await RemoteAhpTerminalHandle.create(this.route, await this.workspace, {
-          argv: ['bash', '-c', buildRemoteStdinWriterCommand(fifoPath, endMarker)],
+          argv: os === 'windows'
+            ? ['powershell', '-NoProfile', '-NonInteractive', '-EncodedCommand',
+              Buffer.from(buildPowerShellStdinWriterScript(pipeName, endMarker), 'utf16le').toString('base64')]
+            : ['bash', '-c', buildRemoteStdinWriterCommand(fifoPath, endMarker)],
           cwd: this.spec.cwd,
           rows: 24,
           cols: 80,
@@ -238,7 +254,7 @@ class RemoteAhpProcessHandle implements SubprocessHandle {
         client.resourceDelete({ uri: stdoutUri, recursive: false }),
         client.resourceDelete({ uri: stderrUri, recursive: false }),
         ...(stdinMode === 'ignore' || stdinMode === 'pipe' ? [] : [client.resourceDelete({ uri: stdinUri, recursive: false })]),
-        ...(stdinMode === 'pipe' ? [client.resourceDelete({ uri: fifoUri, recursive: false })] : []),
+        ...(stdinMode === 'pipe' && os === 'posix' ? [client.resourceDelete({ uri: fifoUri, recursive: false })] : []),
       ])
     }
   }
@@ -259,6 +275,7 @@ class RemoteAhpTerminalHandle implements SubprocessTerminalHandle {
   readonly output = new PassThrough()
   readonly done: Promise<SubprocessOutcome>
 
+  private readonly remoteOs: RemoteOs
   private stopping: ((signal: NodeJS.Signals) => void) | undefined
   private readonly stopped = new Promise<NodeJS.Signals>(resolvePromise => { this.stopping = resolvePromise })
   private terminating: Promise<void> | undefined
@@ -267,7 +284,9 @@ class RemoteAhpTerminalHandle implements SubprocessTerminalHandle {
     private readonly client: AhpClient,
     private readonly channel: string,
     private readonly subscription: Subscription,
+    remoteOs: RemoteOs,
   ) {
+    this.remoteOs = remoteOs
     this.done = this.pump()
   }
 
@@ -277,6 +296,7 @@ class RemoteAhpTerminalHandle implements SubprocessTerminalHandle {
     spec: SubprocessTerminalSpawnSpec,
   ): Promise<RemoteAhpTerminalHandle> {
     if (spec.signal?.aborted) throw spec.signal.reason ?? new Error('remote terminal allocation aborted')
+    const remoteOs = routeRemoteOs(route)
     const client = await workspace.remote.getClient()
     const channel = `ahp-terminal:/${randomUUID()}`
     const claim = { kind: 'client', clientId: workspace.remote.clientId } as TerminalClientClaim
@@ -284,13 +304,13 @@ class RemoteAhpTerminalHandle implements SubprocessTerminalHandle {
       channel,
       claim,
       name: 'DeepSeek Harness Remote SSH subprocess',
-      cwd: fileUriFromPosixPath(route.mapper.toRemotePath(spec.cwd)),
+      cwd: fileUriFromPosixPath(normalizeRemotePath(remoteOs, route.mapper.toRemotePath(spec.cwd))),
       cols: spec.cols,
       rows: spec.rows,
     })
     try {
       const subscribed = await client.subscribe(channel)
-      const handle = new RemoteAhpTerminalHandle(client, channel, subscribed.subscription)
+      const handle = new RemoteAhpTerminalHandle(client, channel, subscribed.subscription, remoteOs)
       if (spec.signal?.aborted) {
         await handle.terminate()
         throw spec.signal.reason ?? new Error('remote terminal allocation aborted')
@@ -300,7 +320,7 @@ class RemoteAhpTerminalHandle implements SubprocessTerminalHandle {
         spec.signal.addEventListener('abort', onAbort, { once: true })
         void handle.done.finally(() => { spec.signal?.removeEventListener('abort', onAbort) }).catch(() => {})
       }
-      client.dispatch(channel, { type: ActionType.TerminalInput, data: `${buildRemoteInteractiveCommand(spec.argv, spec.env)}\r` })
+      client.dispatch(channel, { type: ActionType.TerminalInput, data: `${buildRemoteInteractiveCommand(spec.argv, spec.env, remoteOs)}\r` })
       return handle
     } catch (error) {
       await client.request('disposeTerminal', { channel }).catch(() => {})
@@ -332,6 +352,9 @@ class RemoteAhpTerminalHandle implements SubprocessTerminalHandle {
       return -1
     }
     if (signal === 'SIGTSTP') {
+      if (this.remoteOs === 'windows') {
+        throw new Error('dsh-remote-ssh: Windows remotes have no SIGTSTP; Ctrl-Z is not a suspend key there')
+      }
       await this.write('\x1a')
       return -1
     }
@@ -492,37 +515,70 @@ async function readRemoteOutput(client: AhpClient, uri: string): Promise<Buffer>
   return result.encoding === BASE64 ? Buffer.from(result.data, 'base64') : Buffer.from(result.data, 'utf8')
 }
 
+/** Stdin wiring shared by the POSIX redirection and the Windows .NET pump. */
+export type RemoteStdinSource = { kind: 'eof' } | { kind: 'file'; path: string } | { kind: 'pipe'; name: string }
+
 export function buildRemoteProcessCommand(
   argv: readonly string[],
   env: NodeJS.ProcessEnv | Readonly<Record<string, string>> | undefined,
-  stdinPath: string,
+  stdin: RemoteStdinSource,
   stdoutPath: string,
   stderrPath: string,
+  os: RemoteOs = 'posix',
 ): string {
   const executable = argv[0]
   if (executable === undefined || executable.length === 0) throw new Error('dsh-remote-ssh: subprocess argv must contain a program')
-  const envArgs: string[] = []
-  for (const [key, value] of Object.entries(env ?? {})) {
+  const envEntries = Object.entries(env ?? {})
+  for (const [key] of envEntries) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error(`dsh-remote-ssh: invalid environment variable '${key}'`)
+  }
+  if (os === 'windows') {
+    return buildPowerShellProcessScript({
+      fileName: remoteExecutable(executable, os),
+      args: argv.slice(1),
+      env: Object.fromEntries(envEntries.map(([key, value]) => [key, value === undefined ? undefined : String(value)])),
+      stdin: stdin.kind === 'file' ? { kind: 'file', path: toNativeRemotePath(os, normalizeRemotePath(os, stdin.path)) } : stdin,
+      stdoutPath: toNativeRemotePath(os, normalizeRemotePath(os, stdoutPath)),
+      stderrPath: toNativeRemotePath(os, normalizeRemotePath(os, stderrPath)),
+    })
+  }
+  const envArgs: string[] = []
+  for (const [key, value] of envEntries) {
     if (value === undefined) envArgs.push('-u', key)
     else envArgs.push(`${key}=${value}`)
   }
-  const remoteArgv = [remoteExecutable(executable), ...argv.slice(1)]
+  const remoteArgv = [remoteExecutable(executable, os), ...argv.slice(1)]
+  const stdinPath = stdin.kind === 'file' ? stdin.path : '/dev/null'
   return `exec env ${envArgs.map(quotePosix).join(' ')} ${remoteArgv.map(quotePosix).join(' ')} < ${quotePosix(stdinPath)} > ${quotePosix(stdoutPath)} 2> ${quotePosix(stderrPath)}`
 }
 
 export function buildRemoteInteractiveCommand(
   argv: readonly string[],
   env: Readonly<Record<string, string>> | undefined,
+  os: RemoteOs = 'posix',
 ): string {
   const executable = argv[0]
   if (executable === undefined || executable.length === 0) throw new Error('dsh-remote-ssh: terminal argv must contain a program')
-  const envArgs: string[] = []
-  for (const [key, value] of Object.entries(env ?? {})) {
+  const envEntries = Object.entries(env ?? {})
+  for (const [key] of envEntries) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error(`dsh-remote-ssh: invalid environment variable '${key}'`)
+  }
+  if (os === 'windows') {
+    // Whole-invocation encoding keeps the typed line free of default-shell
+    // metacharacters; simple flag/b64-only argv stays plain for readability.
+    if (envEntries.length === 0 && argv.every(argument => /^[A-Za-z0-9=+./_-]*$/.test(argument))) {
+      return argv.join(' ')
+    }
+    return powerShellCommand(buildPowerShellInteractiveScript(
+      [remoteExecutable(executable, os), ...argv.slice(1)],
+      env,
+    ))
+  }
+  const envArgs: string[] = []
+  for (const [key, value] of envEntries) {
     envArgs.push(`${key}=${value}`)
   }
-  const remoteArgv = [remoteExecutable(executable), ...argv.slice(1)]
+  const remoteArgv = [remoteExecutable(executable, os), ...argv.slice(1)]
   return `exec env ${envArgs.map(quotePosix).join(' ')} ${remoteArgv.map(quotePosix).join(' ')}`
 }
 
@@ -535,7 +591,12 @@ async function delay(ms: number): Promise<void> {
   await new Promise(resolvePromise => setTimeout(resolvePromise, ms))
 }
 
-function remoteExecutable(executable: string): string {
+function remoteExecutable(executable: string, os: RemoteOs = 'posix'): string {
+  if (os === 'windows') {
+    // A Windows-shaped executable is already native; POSIX-shaped spellings
+    // are left intact and fail remotely rather than being silently renamed.
+    return executable
+  }
   if (!/^(?:[A-Za-z]:[\\/]|\\\\)/.test(executable)) return executable
   return win32.basename(executable).replace(/\.exe$/i, '')
 }

@@ -1,9 +1,9 @@
 import { registerHooks } from 'node:module'
-import { posix } from 'node:path'
 import type { LoadFnOutput, ModuleSource } from 'node:module'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type { RemoteSshManager } from '../routing/manager.ts'
+import { resolveRemotePath, toNativeRemotePath } from './remote-paths.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -60,7 +60,7 @@ export function injectSearchPathHook(source: string): string {
   return source.replace(FUNCTION_START, match => match + FUNCTION_HOOK)
 }
 
-/** Return an absolute POSIX path for remote results; leave local paths to stock behavior. */
+/** Return an absolute model-visible remote path; leave local paths to stock behavior. */
 export function remoteAbsolutePath(
   manager: RemoteSshManager,
   path: string,
@@ -69,7 +69,8 @@ export function remoteAbsolutePath(
   const route = manager.route(undefined, workdir)
   if (route.kind !== 'remote') return undefined
   const remoteWorkdir = route.mapper.toRemotePath(workdir, route.aliasPath)
-  return posix.resolve(remoteWorkdir, path)
+  const os = route.mapper.remoteOs
+  return toNativeRemotePath(os, resolveRemotePath(os, remoteWorkdir, path))
 }
 
 function sourceText(source: ModuleSource): string {

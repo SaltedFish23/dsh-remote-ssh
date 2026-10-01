@@ -19,6 +19,7 @@ import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
 import type { FsBytesWriteOutcome } from './binary-fs.ts'
 import type { RemoteSshRuntime } from './runtime.ts'
 import { fileUriFromPosixPath, posixPathFromFileUri, WorkspacePathMapper } from './runtime.ts'
+import { normalizeRemotePath, remoteRelativePath, toNativeRemotePath, type RemoteOs } from './remote-paths.ts'
 
 export interface Config {
   diffBasisMaxBytes?: number
@@ -54,6 +55,11 @@ export class RemoteSshFileSystem extends FileSystem {
   private readonly mapper: WorkspacePathMapper
   private readonly locks = new Map<string, Promise<unknown>>()
 
+  /** OS dialect of the remote host; test doubles default to POSIX. */
+  private get remoteOs(): RemoteOs {
+    return this.remote.remoteOs ?? 'posix'
+  }
+
   constructor(ctx: Context, config: Config) {
     super(ctx)
     this.remote = ctx.remoteSsh
@@ -62,7 +68,7 @@ export class RemoteSshFileSystem extends FileSystem {
       throw new Error('dsh-remote-ssh/fs: localWorkspace and remoteWorkspace must be configured together')
     }
     this.mapper = config.localWorkspace !== undefined && config.remoteWorkspace !== undefined
-      ? new WorkspacePathMapper(config.localWorkspace, config.remoteWorkspace)
+      ? new WorkspacePathMapper(config.localWorkspace, config.remoteWorkspace, this.remoteOs)
       : requireRuntimeMapper(this.remote)
     for (const [name, value] of Object.entries({ diffBasisMaxBytes: this.config.diffBasisMaxBytes, maxReadBytes: this.config.maxReadBytes })) {
       if (!Number.isSafeInteger(value) || value <= 0) {
@@ -107,8 +113,8 @@ export class RemoteSshFileSystem extends FileSystem {
   }
 
   override contains(parent: FsTarget, child: FsTarget): boolean {
-    const rel = posix.relative(this.processPath(parent), this.processPath(child))
-    return rel === '' || (rel !== '..' && !rel.startsWith('../') && !posix.isAbsolute(rel))
+    const rel = remoteRelativePath(this.remoteOs, this.processPath(parent), this.processPath(child))
+    return rel === '' || (rel !== '..' && !rel.startsWith('../'))
   }
 
   override async stat(target: FsTarget, signal?: AbortSignal): Promise<FsInfo | undefined> {
@@ -382,7 +388,7 @@ export class RemoteSshFileSystem extends FileSystem {
     const uri = fileUriFromPosixPath(remotePath)
     return {
       targetKey: FsTargetKey(uri),
-      displayPath: posix.normalize(remotePath),
+      displayPath: toNativeRemotePath(this.remoteOs, normalizeRemotePath(this.remoteOs, remotePath)),
     }
   }
 
@@ -435,8 +441,8 @@ function assertMutationAllowed(mapper: WorkspacePathMapper, target: FsTarget, po
   }
   const workspace = mapper.toRemotePath(policy.workspaceRoot)
   const path = posixPathFromFileUri(String(target.targetKey))
-  const rel = posix.relative(workspace, path)
-  if (rel === '..' || rel.startsWith('../') || posix.isAbsolute(rel)) {
+  const rel = remoteRelativePath(mapper.remoteOs, workspace, path)
+  if (rel === '..' || rel.startsWith('../')) {
     throw new FsError(`remote mutation denied outside workspace: \"${target.displayPath}\"`, 'FS_SANDBOX_DENIED')
   }
 }

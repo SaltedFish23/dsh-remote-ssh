@@ -16,6 +16,7 @@ import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
 import type { RemoteSshManager, RemoteWorkspaceRoute } from './manager.ts'
 import { binaryWriter } from '../transport/binary-fs.ts'
 import type { FsBytesWriteOutcome } from '../transport/binary-fs.ts'
+import { remoteRelativePath } from '../transport/remote-paths.ts'
 
 interface RemoteTargetEnvelope {
   workspaceId: string
@@ -66,8 +67,8 @@ export class TransparentFileSystem extends FileSystem {
     const route = this.manager.workspace(parentRemote.workspaceId)
     const parentPath = route.mapper.toRemotePath(parent.displayPath)
     const childPath = route.mapper.toRemotePath(child.displayPath)
-    const rel = posix.relative(parentPath, childPath)
-    return rel === '' || (rel !== '..' && !rel.startsWith('../') && !posix.isAbsolute(rel))
+    const rel = remoteRelativePath(route.mapper.remoteOs, parentPath, childPath)
+    return rel === '' || (rel !== '..' && !rel.startsWith('../'))
   }
 
   override async stat(target: FsTarget, signal?: AbortSignal): Promise<FsInfo | undefined> {

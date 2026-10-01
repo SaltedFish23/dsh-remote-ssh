@@ -110,6 +110,7 @@ async function setup() {
   let sshFallbacks = 0
   const manager = {
     route: () => route,
+    remoteDialect: () => 'bash' as const,
     workspaceContext: async () => ({ remote }),
     workspaceShell: async () => shell,
     sshTransport: () => { sshFallbacks += 1; return { executable: 'ssh', args: [], multiplexed: false } },
@@ -130,7 +131,7 @@ function shellResult(exitCode: number | null, signal: NodeJS.Signals | null) {
 describe('AHP transparent subprocess', () => {
   it('builds a quoted remote argv without retaining a Windows executable path', () => {
     const command = buildRemoteProcessCommand(
-      ['C:\\tools\\rg.exe', "a'b"], { SAFE: 'x y' }, '/tmp/in', '/tmp/out', '/tmp/err',
+      ['C:\\tools\\rg.exe', "a'b"], { SAFE: 'x y' }, { kind: 'file', path: '/tmp/in' }, '/tmp/out', '/tmp/err',
     )
     expect(command).toContain("'rg' 'a'\"'\"'b'")
     expect(command).toContain("'SAFE=x y'")

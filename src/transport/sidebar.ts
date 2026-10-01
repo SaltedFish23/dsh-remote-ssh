@@ -8,7 +8,10 @@ import type { AhpClient } from '@microsoft/agent-host-protocol/client'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type { RemoteSshManager, RemoteWorkspaceRoute } from '../routing/manager.ts'
+import { routeRemoteOs } from '../routing/manager.ts'
 import { fileUriFromPosixPath, quotePosix } from './runtime.ts'
+import { isRemoteAbsolutePath, normalizeRemotePath, remotePathKey, toNativeRemotePath, type RemoteOs } from './remote-paths.ts'
+import { buildPowerShellProcessScript } from './powershell.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -250,8 +253,8 @@ export function sidebarBridgeRoute(
 ): RemoteWorkspaceRoute | undefined {
   const routed = manager.route(undefined, cwd)
   if (routed.kind === 'remote') return routed
-  if (!posix.isAbsolute(cwd) || /^[a-zA-Z]:[\\/]/.test(cwd) || cwd.startsWith('\\\\')) return undefined
-  const route = remembered.get(posix.normalize(cwd))
+  if (!posix.isAbsolute(cwd) && !/^[A-Za-z]:[\\/]/.test(cwd) && !cwd.startsWith('\\\\')) return undefined
+  const route = remembered.get(rememberedRootKey(cwd))
   if (route === undefined || existsSync(cwd)) return undefined
   return route
 }
@@ -262,9 +265,21 @@ export function buildRemoteGitCommand(
   args: readonly string[],
   stdoutPath: string,
   stderrPath: string,
+  os: RemoteOs = 'posix',
 ): string {
   if (args.length === 0) throw new Error('dsh-remote-ssh: sidebar git bridge requires at least one git argument')
   const argv = ['-C', root, '--no-pager', '-c', 'color.ui=false', ...args]
+  if (os === 'windows') {
+    // A .NET process wrapper keeps redirects byte-exact; PowerShell's own `>`
+    // would re-encode porcelain output on Windows PowerShell 5.1.
+    return buildPowerShellProcessScript({
+      fileName: 'git',
+      args: argv,
+      stdin: { kind: 'eof' },
+      stdoutPath: toNativeRemotePath(os, normalizeRemotePath(os, stdoutPath)),
+      stderrPath: toNativeRemotePath(os, normalizeRemotePath(os, stderrPath)),
+    })
+  }
   return `git ${argv.map(quotePosix).join(' ')} < /dev/null > ${quotePosix(stdoutPath)} 2> ${quotePosix(stderrPath)}`
 }
 
@@ -281,9 +296,10 @@ export async function runRemoteGit(
   args: readonly string[],
   timeoutMs: number | undefined,
 ): Promise<string> {
-  const remoteRoot = route.mapper.toRemotePath(cwd)
+  const os = routeRemoteOs(route)
+  const remoteRoot = toNativeRemotePath(os, normalizeRemotePath(os, route.mapper.toRemotePath(cwd)))
   const [shell, workspace] = await Promise.all([
-    manager.workspaceShell(route, 'bash'),
+    manager.workspaceShell(route, manager.remoteDialect(route)),
     manager.workspaceContext(route),
   ])
   const client = await workspace.remote.getClient()
@@ -293,7 +309,7 @@ export async function runRemoteGit(
   const budgetMs = Math.max(Math.floor(timeoutMs ?? STOCK_TIMEOUT_MS), REMOTE_TIMEOUT_FLOOR_MS)
   try {
     const execution = await shell.execute(shell.resolve({
-      command: buildRemoteGitCommand(remoteRoot, args, stdoutPath, stderrPath),
+      command: buildRemoteGitCommand(remoteRoot, args, stdoutPath, stderrPath, os),
       workdir: route.aliasPath,
       timeoutMs: budgetMs,
       onExpiry: 'kill',
@@ -338,6 +354,7 @@ export async function listRemoteDirectory(
   path: string,
   maxEntries: number,
 ): Promise<SidebarListing> {
+  const os = routeRemoteOs(route)
   const remoteDir = route.mapper.toRemotePath(path)
   const workspace = await manager.workspaceContext(route)
   const client = await workspace.remote.getClient()
@@ -346,11 +363,11 @@ export async function listRemoteDirectory(
   const truncated = sorted.length > maxEntries
   const kept = truncated ? sorted.slice(0, maxEntries) : sorted
   return {
-    path: remoteDir,
+    path: toNativeRemotePath(os, remoteDir),
     truncated,
     entries: kept.map(entry => ({
       name: entry.name,
-      path: posix.join(remoteDir, entry.name),
+      path: toNativeRemotePath(os, posix.join(remoteDir, entry.name)),
       isDir: entry.type === 'directory',
       // AHP resourceList exposes no symlink bit; stock symlink probing stays
       // a local-stat concern and simply does not apply to remote rows.
@@ -470,6 +487,7 @@ export function rememberRemoteRoots(
   args: readonly string[],
   stdout: string,
 ): void {
+  const os = routeRemoteOs(route)
   const roots: string[] = []
   if (args[0] === 'rev-parse' && args.includes('--show-toplevel')) {
     roots.push(...stdout.split('\n').map(line => line.trim()))
@@ -479,7 +497,9 @@ export function rememberRemoteRoots(
     }
   }
   for (const root of roots) {
-    if (posix.isAbsolute(root)) rememberRoot(remembered, root, route)
+    // Windows git prints drive paths with forward slashes (`C:/repos/x`);
+    // both spellings must land on the same remembered key.
+    if (isRemoteAbsolutePath(os, root)) rememberRoot(remembered, root, route)
   }
 }
 
@@ -546,8 +566,14 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
   }
 }
 
+/** Canonical remembered-root key: internal form, case-folded for NTFS remotes. */
+function rememberedRootKey(root: string): string {
+  const os: RemoteOs = /^[A-Za-z]:[\\/]/.test(root) || root.startsWith('\\\\') || /^\/[A-Za-z]:/.test(root) || root.startsWith('//') ? 'windows' : 'posix'
+  return remotePathKey(os, root)
+}
+
 function rememberRoot(remembered: Map<string, RemoteWorkspaceRoute>, root: string, route: RemoteWorkspaceRoute): void {
-  const key = posix.normalize(root)
+  const key = rememberedRootKey(root)
   remembered.delete(key)
   remembered.set(key, route)
   while (remembered.size > REMEMBERED_ROOT_LIMIT) {

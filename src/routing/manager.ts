@@ -15,7 +15,19 @@ import z from '@deepseek-ai/schemastery'
 import RemoteSshFileSystem from '../transport/fs.ts'
 import RemoteSshRuntime, { fileUriFromPosixPath, posixPathFromFileUri, WorkspacePathMapper } from '../transport/runtime.ts'
 import type { RemoteSshLinkState } from '../transport/runtime.ts'
+import {
+  deriveRemoteOs,
+  isRemoteAbsolutePath,
+  isRemoteRoot,
+  normalizeRemotePath,
+  remotePathKey,
+  remoteRelativePath,
+  remoteRootOf,
+  toNativeRemotePath,
+  type RemoteOs,
+} from '../transport/remote-paths.ts'
 import RemoteSshShellExecutor from '../transport/shell.ts'
+import { buildRemoteOsProbeCommand } from '../transport/powershell.ts'
 
 /** One SSH destination visible in Settings and workspace selection. */
 export interface RemoteSshServer {
@@ -25,6 +37,8 @@ export interface RemoteSshServer {
   sshArgs?: string[]
   remoteCodeCommand?: string
   sshExecutable?: string
+  /** OS family detected by the Settings probe; a Windows-shaped workspace path also implies it. */
+  remoteOs?: RemoteOs
   /** Optional fixed override; zero lets the singleton choose a free port. */
   backendPort?: number
 }
@@ -133,6 +147,7 @@ const serverSchema: z<RemoteSshServer> = z.object({
   sshArgs: z.array(z.string()),
   remoteCodeCommand: z.string(),
   sshExecutable: z.string(),
+  remoteOs: z.union(['posix', 'windows'] as const),
   backendPort: z.number(),
 })
 
@@ -237,10 +252,13 @@ export class RemoteSshManager extends Service {
   private readonly entryId: string | undefined
   private readonly routes = new Map<string, RemoteWorkspaceRoute>()
   private readonly routeByWorkspaceId = new Map<string, RemoteWorkspaceRoute>()
-  private readonly remoteAliases = new Set<string>()
+  /** Tombstoned aliases with their remote OS, so stale sessions keep the right dialect. */
+  private readonly remoteAliases = new Map<string, RemoteOs>()
   private readonly contexts = new Map<string, Promise<RemoteWorkspaceContext>>()
   private readonly shellContexts = new Map<string, Promise<RemoteWorkspaceShellContext>>()
   private readonly hosts = new Map<string, Promise<RemoteHostContext>>()
+  /** Memoized remote-OS probes for servers without a recorded or inferable OS. */
+  private readonly detectedServerOs = new Map<string, Promise<RemoteOs>>()
   private readonly sessionWorlds = new Map<string, {
     owner: object
     workspaceId: string | null
@@ -393,20 +411,27 @@ export class RemoteSshManager extends Service {
   async listRemoteDirectory(server: RemoteSshServer, requestedPath?: string): Promise<RemoteDirectoryListing> {
     const host = await this.hostContext(server)
     const connection = await host.remote.getConnection()
+    const os: RemoteOs = host.remote.remoteOs ?? 'posix'
     const home = connection.defaultDirectory === undefined
-      ? '/'
-      : posixPathFromFileUri(String(connection.defaultDirectory))
-    const path = posix.normalize(requestedPath?.trim() || home)
-    if (!posix.isAbsolute(path)) throw new Error('remote directory path must be an absolute POSIX path')
-    const listed = await connection.client.resourceList({ uri: fileUriFromPosixPath(path) })
+      ? (os === 'windows' ? 'C:\\' : '/')
+      : toNativeRemotePath(os, normalizeRemotePath(os, posixPathFromFileUri(String(connection.defaultDirectory))))
+    const rawPath = requestedPath?.trim() || home
+    const path = toNativeRemotePath(os, normalizeRemotePath(os, rawPath))
+    if (!isRemoteAbsolutePath(os, rawPath)) {
+      throw new Error(os === 'windows'
+        ? 'remote directory path must be an absolute Windows path such as C:\\Users\\me'
+        : 'remote directory path must be an absolute POSIX path')
+    }
+    const listed = await connection.client.resourceList({ uri: fileUriFromPosixPath(normalizeRemotePath(os, rawPath)) })
+    const internal = normalizeRemotePath(os, rawPath)
     return {
       path,
       home,
-      ...(path === '/' ? {} : { parent: posix.dirname(path) }),
+      ...(isRemoteRoot(os, internal) ? {} : { parent: toNativeRemotePath(os, posix.dirname(internal)) }),
       entries: listed.entries
         .filter(entry => entry.type === 'directory')
         .sort((left, right) => left.name.localeCompare(right.name))
-        .map(entry => ({ name: entry.name, path: posix.join(path, entry.name) })),
+        .map(entry => ({ name: entry.name, path: toNativeRemotePath(os, posix.join(internal, entry.name)) })),
     }
   }
 
@@ -422,7 +447,13 @@ export class RemoteSshManager extends Service {
 
   /** Create and register one remote workspace alias. */
   async addWorkspace(serverId: string, remotePath: string): Promise<RemoteWorkspaceRoute> {
-    const workspace: RemoteSshWorkspace = { id: randomUUID(), serverId, remotePath }
+    const server = this.current.servers.find(candidate => candidate.id === serverId)
+    if (server === undefined) throw new Error(`dsh-remote-ssh: unknown server '${serverId}'`)
+    const workspace: RemoteSshWorkspace = {
+      id: randomUUID(),
+      serverId,
+      remotePath: normalizeRemotePath(deriveRemoteOs(server.remoteOs, remotePath), remotePath),
+    }
     const next = this.snapshot()
     next.workspaces.push(workspace)
     this.validate(next)
@@ -542,26 +573,36 @@ export class RemoteSshManager extends Service {
     return this.route(undefined, workdir)
   }
 
-  /** Model-facing shell dialect for a workspace cwd. Remote workspaces are POSIX today. */
+  /** Model-facing shell dialect for a workspace cwd, keyed on the remote OS. */
   dialectFor(cwd?: string): 'bash' | 'pwsh' {
-    if (cwd !== undefined && (this.findAlias(cwd) !== undefined || this.wasRemoteAlias(cwd) || this.findRemotePath(cwd) !== undefined)) {
-      return 'bash'
+    if (cwd !== undefined) {
+      const route = this.findAlias(cwd)
+      if (route !== undefined) return this.remoteDialect(route)
+      if (this.wasRemoteAlias(cwd)) return this.remoteAliasOs(cwd) === 'windows' ? 'pwsh' : 'bash'
+      const byPath = this.findRemotePath(cwd)
+      if (byPath !== undefined) return this.remoteDialect(byPath)
     }
     return process.platform === 'win32' ? 'pwsh' : 'bash'
   }
 
+  /** Native shell dialect of one remote workspace route. */
+  remoteDialect(route: RemoteWorkspaceRoute): 'bash' | 'pwsh' {
+    return routeRemoteOs(route) === 'windows' ? 'pwsh' : 'bash'
+  }
+
   /** Presentation-only logical cwd that never exposes the local UUID alias. */
   displayRemoteCwd(route: RemoteWorkspaceRoute, workdir?: string): string {
+    const os = routeRemoteOs(route)
     const remotePath = workdir === undefined || workdir.trim() === ''
       ? route.workspace.remotePath
       : route.mapper.toRemotePath(workdir, route.aliasPath)
-    const normalized = posix.normalize(remotePath)
-    const workspaceRoot = posix.normalize(route.workspace.remotePath)
-    const relativePath = posix.relative(workspaceRoot, normalized)
+    const normalized = normalizeRemotePath(os, remotePath)
+    const workspaceRoot = normalizeRemotePath(os, route.workspace.remotePath)
+    const relativePath = remoteRelativePath(os, workspaceRoot, normalized)
     const workspaceTitle = route.workspace.title
       ?? `${route.server.label} > ${posix.basename(workspaceRoot) || workspaceRoot}`
-    if (relativePath === '' || (relativePath !== '..' && !relativePath.startsWith('../') && !posix.isAbsolute(relativePath))) {
-      return posix.join('/', workspaceTitle, relativePath)
+    if (relativePath === '' || (relativePath !== '..' && !relativePath.startsWith('../'))) {
+      return posix.join('/', workspaceTitle, relativePath.replaceAll('\\', '/'))
     }
     return posix.join('/', `${route.server.label} > remote`, normalized)
   }
@@ -622,13 +663,18 @@ export class RemoteSshManager extends Service {
       const aliasPath = resolve(workspace.aliasPath ?? resolve(config.aliasRoot, workspace.id))
       await mkdir(aliasPath, { recursive: true })
       const canonicalAlias = resolve(aliasPath)
+      const remoteOs = deriveRemoteOs(server.remoteOs, workspace.remotePath)
       const route: RemoteWorkspaceRoute = {
-        kind: 'remote', server, workspace, aliasPath: canonicalAlias,
-        mapper: new WorkspacePathMapper(canonicalAlias, workspace.remotePath),
+        kind: 'remote', server,
+        // Published routes carry the canonical internal spelling; the durable
+        // settings keep whatever spelling the user entered.
+        workspace: { ...workspace, remotePath: normalizeRemotePath(remoteOs, workspace.remotePath) },
+        aliasPath: canonicalAlias,
+        mapper: new WorkspacePathMapper(canonicalAlias, workspace.remotePath, remoteOs),
       }
       nextRoutes.set(normalizeLocal(canonicalAlias), route)
       nextById.set(workspace.id, route)
-      this.remoteAliases.add(normalizeLocal(canonicalAlias))
+      this.remoteAliases.set(normalizeLocal(canonicalAlias), routeRemoteOs(route))
     }
     for (const [id, pending] of this.contexts) {
       const previous = this.routeByWorkspaceId.get(id)
@@ -690,18 +736,22 @@ export class RemoteSshManager extends Service {
   }
 
   private findRemotePath(path: string): RemoteWorkspaceRoute | undefined {
-    if (!posix.isAbsolute(path) || /^[a-zA-Z]:[\\/]/.test(path) || path.startsWith('\\\\')) return undefined
-    const normalized = posix.normalize(path)
+    if (path === undefined || path.length === 0) return undefined
+    const normalizedInput = normalizeRemotePath('windows', path)
     let best: RemoteWorkspaceRoute | undefined
     let bestLength = -1
     for (const route of this.routeByWorkspaceId.values()) {
-      const root = posix.normalize(route.workspace.remotePath)
-      const rel = posix.relative(root, normalized)
-      if (rel !== '' && (rel === '..' || rel.startsWith('../') || posix.isAbsolute(rel))) continue
-      if (root.length > bestLength) {
+      const os = routeRemoteOs(route)
+      if (!isRemoteAbsolutePath(os, path)) continue
+      const root = normalizeRemotePath(os, route.workspace.remotePath)
+      const normalized = os === 'windows' ? normalizedInput : posix.normalize(path)
+      const rel = remoteRelativePath(os, root, normalized)
+      if (rel !== '' && rel.startsWith('../')) continue
+      const key = remotePathKey(os, root)
+      if (key.length > bestLength) {
         best = route
-        bestLength = root.length
-      } else if (root.length === bestLength && best?.workspace.id !== route.workspace.id) {
+        bestLength = key.length
+      } else if (key.length === bestLength && best?.workspace.id !== route.workspace.id) {
         throw new Error(`dsh-remote-ssh: remote path matches multiple workspaces: ${path}`)
       }
     }
@@ -710,7 +760,16 @@ export class RemoteSshManager extends Service {
 
   private wasRemoteAlias(path: string): boolean {
     const absolute = normalizeLocal(resolve(path))
-    return [...this.remoteAliases].some(alias => isContained(alias, absolute))
+    return [...this.remoteAliases.keys()].some(alias => isContained(alias, absolute))
+  }
+
+  /** Remote OS recorded for a tombstoned alias, defaulting to POSIX. */
+  private remoteAliasOs(path: string): RemoteOs {
+    const absolute = normalizeLocal(resolve(path))
+    for (const [alias, os] of this.remoteAliases) {
+      if (isContained(alias, absolute)) return os
+    }
+    return 'posix'
   }
 
   private async createWorkspaceContext(route: RemoteWorkspaceRoute): Promise<RemoteWorkspaceContext> {
@@ -781,16 +840,40 @@ export class RemoteSshManager extends Service {
     }
   }
 
+  /**
+   * Resolve the remote OS with one memoized SSH probe. The command succeeds
+   * with `Win32NT` only on Windows; POSIX hosts answer 127 (or `Unix` when a
+   * PowerShell happens to be installed). A failed probe reads as POSIX so the
+   * connection attempt surfaces the real SSH error instead.
+   */
+  private detectRemoteOs(server: RemoteSshServer): Promise<RemoteOs> {
+    const key = serverRuntimeKey(server)
+    let pending = this.detectedServerOs.get(key)
+    if (pending === undefined) {
+      pending = probeRemoteOs(server).catch(() => 'posix' as const)
+      this.detectedServerOs.set(key, pending)
+    }
+    return pending
+  }
+
   private async createHostContext(server: RemoteSshServer): Promise<RemoteHostContext> {
     const child = new Context()
     const transport = this.transportFor(server)
+    // OS precedence: an explicit server fact, then the spelling of any stored
+    // workspace path, then a one-shot SSH probe that stays memoized per
+    // server. Browsing runs before any workspace exists, so the probe is what
+    // keeps a Windows host from receiving the POSIX bootstrap.
+    const workspacePath = this.current.workspaces.find(workspace => workspace.serverId === server.id)?.remotePath
+    const inferred = workspacePath !== undefined ? deriveRemoteOs(undefined, workspacePath) : undefined
+    const remoteOs = server.remoteOs ?? inferred ?? await this.detectRemoteOs(server)
     try {
       await child.plugin(RemoteSshRuntime, {
         sshTarget: server.sshTarget,
         sshExecutable: transport.executable,
         sshArgs: transport.args,
         remoteCodeCommand: server.remoteCodeCommand ?? 'code',
-        remoteAccessRoot: '/',
+        remoteOs,
+        ...(remoteOs === 'posix' ? { remoteAccessRoot: '/' } : {}),
         startupTimeoutMs: this.current.startupTimeoutMs,
         requestTimeoutMs: this.current.requestTimeoutMs,
       })
@@ -872,10 +955,20 @@ export class RemoteSshManager extends Service {
     }
     const workspaceIds = new Set<string>()
     const aliases = new Set<string>()
+    const remotePaths = new Set<string>()
     for (const workspace of config.workspaces) {
       if (!ID_PATTERN.test(workspace.id) || workspaceIds.has(workspace.id)) throw new Error(`dsh-remote-ssh: invalid or duplicate workspace id '${workspace.id}'`)
-      if (!serverIds.has(workspace.serverId)) throw new Error(`dsh-remote-ssh: workspace '${workspace.id}' refers to unknown server '${workspace.serverId}'`)
-      if (!posix.isAbsolute(workspace.remotePath)) throw new Error(`dsh-remote-ssh: workspace '${workspace.id}' remotePath must be an absolute POSIX path`)
+      const server = config.servers.find(candidate => candidate.id === workspace.serverId)
+      if (server === undefined) throw new Error(`dsh-remote-ssh: workspace '${workspace.id}' refers to unknown server '${workspace.serverId}'`)
+      const os = deriveRemoteOs(server.remoteOs, workspace.remotePath)
+      if (!isRemoteAbsolutePath(os, workspace.remotePath)) {
+        throw new Error(`dsh-remote-ssh: workspace '${workspace.id}' remotePath must be an absolute ${os === 'windows' ? 'Windows' : 'POSIX'} path`)
+      }
+      const remoteKey = remotePathKey(os, normalizeRemotePath(os, workspace.remotePath))
+      if (remotePaths.has(`${workspace.serverId}\0${remoteKey}`)) {
+        throw new Error(`dsh-remote-ssh: duplicate remote path '${workspace.remotePath}' on server '${workspace.serverId}'`)
+      }
+      remotePaths.add(`${workspace.serverId}\0${remoteKey}`)
       if (workspace.title !== undefined && workspace.title.trim().length === 0) throw new Error(`dsh-remote-ssh: workspace '${workspace.id}' title must be non-empty`)
       const alias = normalizeLocal(resolve(workspace.aliasPath ?? resolve(config.aliasRoot, workspace.id)))
       if (aliases.has(alias)) throw new Error(`dsh-remote-ssh: duplicate workspace alias '${alias}'`)
@@ -885,10 +978,45 @@ export class RemoteSshManager extends Service {
   }
 }
 
+/** Effective remote OS of one route: the server's recorded OS, or the stored path's spelling. */
+export function routeRemoteOs(route: RemoteWorkspaceRoute): RemoteOs {
+  return deriveRemoteOs(route.server.remoteOs, route.workspace.remotePath)
+}
+
+/** One `ssh -T` exec with captured output and a hard timeout. */
+async function captureSsh(executable: string, args: readonly string[], timeoutMs: number): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(executable, [...args], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    const stdout: Buffer[] = []
+    const stderr: Buffer[] = []
+    child.stdout.on('data', (chunk: Buffer) => { stdout.push(chunk) })
+    child.stderr.on('data', (chunk: Buffer) => { stderr.push(chunk) })
+    child.once('error', reject)
+    const timer = setTimeout(() => { child.kill() }, timeoutMs)
+    child.once('close', exitCode => {
+      clearTimeout(timer)
+      resolvePromise({
+        exitCode,
+        stdout: Buffer.concat(stdout).toString('utf8'),
+        stderr: Buffer.concat(stderr).toString('utf8'),
+      })
+    })
+  })
+}
+
+async function probeRemoteOs(server: RemoteSshServer): Promise<RemoteOs> {
+  const transport = {
+    executable: server.sshExecutable ?? 'ssh',
+    args: [...(server.sshArgs ?? []), '-T', server.sshTarget, buildRemoteOsProbeCommand()],
+  }
+  const result = await captureSsh(transport.executable, transport.args, 20_000)
+  return result.exitCode === 0 && /Win32NT/.test(result.stdout) ? 'windows' : 'posix'
+}
+
 function serverRuntimeKey(server: RemoteSshServer): string {
   // backendPort is retained for config compatibility with the deferred remote
   // Backend surface; it no longer participates in any live connection key.
-  return JSON.stringify([server.sshTarget, server.sshArgs ?? [], server.remoteCodeCommand ?? 'code', server.sshExecutable ?? null, server.backendPort ?? 0])
+  return JSON.stringify([server.sshTarget, server.sshArgs ?? [], server.remoteCodeCommand ?? 'code', server.sshExecutable ?? null, server.remoteOs ?? null, server.backendPort ?? 0])
 }
 
 function routeRuntimeKey(route: RemoteWorkspaceRoute): string {

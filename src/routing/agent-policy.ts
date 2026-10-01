@@ -3,6 +3,8 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { TerminalCallView, ToolCallView, ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { RemoteSshManager, RemoteWorkspaceRoute } from './manager.ts'
+import { routeRemoteOs } from './manager.ts'
+import { normalizeRemotePath, toNativeRemotePath } from '../transport/remote-paths.ts'
 
 export const name = 'dsh-remote-ssh-agent-policy'
 export const inject = ['agents', 'remoteSshManager', 'systemPrompt', 'tools']
@@ -71,12 +73,17 @@ export function apply(ctx: Context): void {
 
 /** Replace the host-only Workspace alias with the remote execution cwd. */
 export function installRemoteWorkspacePrompt(ctx: Context, route: RemoteWorkspaceRoute): void {
-  ctx.systemPrompt.variable('cwd', () => route.workspace.remotePath)
+  const os = routeRemoteOs(route)
+  ctx.systemPrompt.variable('cwd', () => toNativeRemotePath(os, normalizeRemotePath(os, route.workspace.remotePath)))
   ctx.systemPrompt.section({
     name: 'remote-ssh:execution-world',
     order: -10,
-    text: 'This session runs in a Remote SSH workspace. All filesystem and shell tools operate '
-      + 'on that remote host, using POSIX paths.',
+    text: os === 'windows'
+      ? 'This session runs in a Remote SSH workspace on a Windows host. All filesystem and shell tools operate '
+        + 'on that remote host, using Windows paths (C:\\Users\\me\\project, case-insensitive) and PowerShell. '
+        + 'Both C:\\Users\\me\\project and /C:/Users/me/project spellings are accepted as absolute paths.'
+      : 'This session runs in a Remote SSH workspace. All filesystem and shell tools operate '
+        + 'on that remote host, using POSIX paths.',
   })
 }
 

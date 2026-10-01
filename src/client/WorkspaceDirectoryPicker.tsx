@@ -41,7 +41,8 @@ export function WorkspaceDirectoryPicker(props: WorkspaceDirectoryPickerProps): 
 
   useEffect(() => {
     if (!props.open) return
-    const initial = props.initialPath.trim().startsWith('/') ? props.initialPath.trim() : undefined
+    const trimmed = props.initialPath.trim()
+    const initial = /^(?:[A-Za-z]:[\\/]|\/)/.test(trimmed) ? trimmed : undefined
     void browse(initial)
     return () => { requestGeneration.current += 1 }
   }, [props.open, props.sourceKey])

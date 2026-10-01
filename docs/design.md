@@ -2,7 +2,7 @@
 
 ## 核心不变量
 
-1. 不存在 `remote_read`、`remote_bash` 等平行工具；shell 名称按工作区 OS 选择（POSIX Remote 为 `bash`，Windows LOCAL 为 `pwsh`）。
+1. 不存在 `remote_read`、`remote_bash` 等平行工具；shell 名称按工作区 OS 选择（POSIX Remote 为 `bash`，Windows Remote 与 Windows LOCAL 为 `pwsh`）。
 2. 当前 workspace cwd 是执行世界的唯一主选择器。
 3. 远端错误、断线、缺少程序和删除映射都 fail closed；禁止本机 fallback。
 4. alias 是稳定身份，不是同步目录或挂载点，也不得出现在模型或插件可见的文件路径中。
@@ -173,7 +173,19 @@ registry 直接委托原本的本地 Channel。
 - 不实现第二套远端工具；完整 Backend 通过通用 `dsh-host` 协议承载 Harness；
 - 不实现经典 Remote Agent 私有 wire protocol；
 - 不声称本地 sandbox 能约束远端内核；
-- 当前不支持 Windows SSH 远端；
-- live stdin 输入泵依赖远端 POSIX `mkfifo` 与 `base64 -d`；
+- 完整 Backend 隧道模式仍仅支持 POSIX 远端（`src/backend/*` 与 dsh-host 安装未做 Windows 适配）；
+- POSIX 远端的 live stdin 输入泵依赖 `mkfifo` 与 `base64 -d`；Windows 远端改用命名管道（`NamedPipeServerStream`）承载相同的 base64 行协议；
 - AHP stdout/stderr Resource polling 当前每次读取整文件，尚无 range/offset read；
 - 当前不自动安装远端 bash/pwsh/rg/code。
+
+## Windows 远端（AHP 透明模式）
+
+Windows 远端的关键机制：
+
+- **OS 判定**：Settings 探测两阶段执行（先 POSIX 探测，失败后 `powershell -EncodedCommand` 探测并返回 `os=Windows_NT` fact），Server 记录 `remoteOs`；Windows 形态的 `remotePath` 亦隐含 `windows`。
+- **内部路径空间**：`C:\Users\me` 规范化为内部形式 `/C:/Users/me`（盘符大写、正斜杠、去尾斜杠；UNC 为 `//server/share`）。该形式与既有 `posix.*` 连接/比较兼容，`encodeURIComponent` 产出的 `file:///C%3A/...` 与 Windows Agent Host 的 URI 一致。模型可见路径一律转回原生 `C:\…` 形式（displayPath、cwd 提示词、spill locator、目录浏览器、编辑器参数）；输入边界（mapper、路由匹配、ssh:// URI、目录浏览）同时接受两种拼写并大小写不敏感匹配（NTFS）。
+- **引导**：所有一次性 SSH 命令（standalone/embedded Agent Host 启动、code-server 枚举、孤儿回收、token 读取）均为 PowerShell 脚本经 `powershell -NoProfile -NonInteractive -EncodedCommand <base64 UTF-16LE>` 包装——参数只含 base64 字符，对 cmd/PowerShell 两种 DefaultShell 的引号规则完全免疫。回收改用 `Get-CimInstance Win32_Process` + `Stop-Process`（模式仅存在于编码载荷内，天然不自杀）。
+- **shell 工具**：载荷暂存为 `command-<token>.ps1`（内嵌 UTF-8 控制台前导），PTY 注入行同样为 EncodedCommand 包装；包装脚本用 .NET `ProcessStartInfo` 调用 pwsh（缺失时回退 powershell），`[Console]::Write([char]30/31)` 发出与 POSIX `printf` 版完全一致的 RS/US 标记字节（解析器防御性容忍 `\r`），退出码取 `$p.ExitCode`；stdin 文件经 `CopyTo` 泵入（broken pipe 容错——子进程提前退出不是包装错误）。
+- **subprocess**：`buildRemoteProcessCommand` 的 Windows 变体用同一 .NET 进程包装，stdout/stderr 以 `CopyToAsync` 字节精确写入文件（避开 Windows PowerShell 5.1 `>` 的 UTF-16 重编码）；live stdin 不再 `mkfifo`，而是 writer 终端宿主 `NamedPipeServerStream`、消费端 `NamedPipeClientStream` 泵入子进程 stdin，行协议（base64 行 + EOF marker）与 POSIX 相同；`SIGTSTP` 在 Windows 远端明确拒绝。
+- **spill**：目录准备从 `umask/mkdir` shell 往返改为 AHP 原生 `resourceMkdir`（逐级创建、容忍已存在），跨平台无 shell 依赖；建议名额外过滤 DOS 设备名。
+- **runtime 根**：Windows 无 `/tmp`；未显式配置时 runtimeRoot/accessRoot 在 AHP `initialize` 后由 `defaultDirectory`（家目录）派生（`<home>/.dsh-remote-ssh/<clientId>` 与工作区盘根）。

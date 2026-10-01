@@ -38,15 +38,21 @@ export function RemoteSshSettings({ t: optionalT }: LocalizedProps): ReactElemen
     await refresh()
   }
   const addWorkspace = async (): Promise<void> => {
-    await request(WORKSPACE_PATH, 'POST', { serverId, remotePath })
+    const server = state.servers.find(candidate => candidate.id === serverId)
+    await request(WORKSPACE_PATH, 'POST', {
+      serverId,
+      remotePath,
+      ...(server?.remoteOs === undefined ? {} : { remoteOs: server.remoteOs }),
+    })
     setRemotePath('')
     await refresh()
   }
   const probe = async (id: string): Promise<void> => {
-    const result = await request<{ reachable: boolean; hostname?: string; commands?: Record<string, boolean>; error?: string }>(PROBE_PATH, 'POST', { id })
+    const result = await request<{ reachable: boolean; hostname?: string; os?: 'posix' | 'windows'; commands?: Record<string, boolean>; error?: string }>(PROBE_PATH, 'POST', { id })
     const commands = Object.entries(result.commands ?? {}).map(([name, yes]) => `${name} ${yes ? '✓' : '×'}`).join(', ')
+    const system = result.os === 'windows' ? ' · Windows' : result.os === 'posix' ? ' · POSIX' : ''
     setMessage(result.reachable
-      ? t('probeSuccess', { hostname: result.hostname ?? id, commands })
+      ? t('probeSuccess', { hostname: `${result.hostname ?? id}${system}`, commands })
       : t('probeFailure', { error: result.error ?? t('unknownError') }))
   }
   return <section style={page}>
@@ -61,6 +67,7 @@ export function RemoteSshSettings({ t: optionalT }: LocalizedProps): ReactElemen
       {state.servers.map(server => <div key={server.id} style={row}>
         <span style={{ flex: 1 }}>
           <b>{server.label}</b>
+          {server.remoteOs === 'windows' ? <span> · Windows</span> : null}
           {server.hostName ? <span> · {server.user ? `${server.user}@` : ''}{server.hostName}{server.port ? `:${server.port}` : ''}</span> : null}
           <small style={{ display: 'block', color: 'var(--dsw-alias-label-secondary)' }}>{server.configPath ?? t('savedServer')}</small>
         </span>
@@ -97,7 +104,7 @@ export function RemoteSshSettings({ t: optionalT }: LocalizedProps): ReactElemen
         <select style={input} aria-label={t('server')} value={serverId} onChange={event => { setServerId(event.target.value); setRemotePath(''); setShowDirectoryPicker(false) }}>
           {state.servers.map(server => <option key={server.id} value={server.id}>{server.label}</option>)}
         </select>
-        <input style={input} aria-label={t('remotePath')} placeholder="/srv/project" value={remotePath} onChange={event => { setRemotePath(event.target.value) }} />
+        <input style={input} aria-label={t('remotePath')} placeholder={t('remotePathPlaceholder')} value={remotePath} onChange={event => { setRemotePath(event.target.value) }} />
         <button style={button} disabled={!serverId} onClick={() => { setShowDirectoryPicker(true) }}>{t('browseRemote')}</button>
         <button style={primary} disabled={!serverId || !remotePath.trim()} onClick={() => { void addWorkspace().catch(error => { setMessage(String(error)) }) }}>{t('addWorkspace')}</button>
       </div>
