@@ -84,6 +84,10 @@ export const en = {
   linkStateFailed: "Connection failed",
   linkStateDisposed: "Disconnected",
   linkStateIdle: "Not connected",
+  deviceStripLabel: "Devices",
+  deviceAll: "All",
+  deviceLocalLabel: "LOCAL",
+  deviceWorkspaceCount: "{count} workspaces",
 };
 
 /** Keys shared by both dictionaries. */
@@ -174,4 +178,8 @@ export const zh: { [Key in RemoteSshLocaleKey]: string } = {
   linkStateFailed: "连接失败",
   linkStateDisposed: "已断开",
   linkStateIdle: "未连接",
+  deviceStripLabel: "设备",
+  deviceAll: "全部",
+  deviceLocalLabel: "LOCAL",
+  deviceWorkspaceCount: "{count} 个工作区",
 };

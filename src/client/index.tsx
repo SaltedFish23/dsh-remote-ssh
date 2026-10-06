@@ -14,6 +14,7 @@ import { RemoteSshSettings } from './RemoteSshSettings.tsx'
 import { RemoteWorkspaceFlow } from './RemoteWorkspaceFlow.tsx'
 import type { RemoteWorkspaceFlowInjected } from './RemoteWorkspaceFlow.tsx'
 import { startWorkspaceLinkDots } from './link-dots.ts'
+import { startDeviceStrip } from './device-strip.ts'
 import { REMOTE_BACKEND_CONTEXT_PATH, type RemoteBackendContext } from '../backend-context.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -38,6 +39,8 @@ export async function apply(ctx: ClientContext): Promise<void> {
   const t = ctx.locale.bind(namespace) as RemoteWorkspaceFlowInjected['t']
   // Right-aligned link dots on remote workspace rows in the sidebar.
   ctx.effect(() => startWorkspaceLinkDots(ctx, t), 'dsh-remote-ssh: workspace link dots')
+  // Device strip + display-only workspace filtering at the section top.
+  ctx.effect(() => startDeviceStrip(ctx, t), 'dsh-remote-ssh: device strip')
   // 0.2.0 migration: the Workspace UI no longer exposes a monkey-patchable
   // openPath entry point, so the transparent file-link router stays disabled
   // until the new open flow is mapped. installRemoteOpenPath(ctx)

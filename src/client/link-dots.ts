@@ -25,7 +25,7 @@ const DOT_STYLE = 'width:10px;height:10px;display:inline-flex;align-items:center
 const CORE_STYLE = 'width:6px;height:6px;border-radius:50%;display:block;'
 
 /** Codex semantics: starting is a warning, healing after a failure is red. */
-const STATE_COLOR: Record<LinkStateName, string> = {
+export const STATE_COLOR: Record<LinkStateName, string> = {
   connecting: 'var(--dsw-alias-state-warn-primary)',
   connected: 'var(--dsw-alias-state-success-primary)',
   reconnecting: 'var(--dsw-alias-state-error-primary)',
@@ -34,7 +34,7 @@ const STATE_COLOR: Record<LinkStateName, string> = {
   idle: 'var(--dsw-alias-state-idle-primary)',
 }
 
-const STATE_LABEL_KEY: Record<LinkStateName, RemoteSshLocaleKey> = {
+export const STATE_LABEL_KEY: Record<LinkStateName, RemoteSshLocaleKey> = {
   connecting: 'linkStateConnecting',
   connected: 'linkStateConnected',
   reconnecting: 'linkStateReconnecting',
@@ -54,7 +54,7 @@ interface WorkspaceListLike {
 }
 
 /** Strip trailing separators so catalog and registry paths compare equal. */
-function normalizePath(path: string): string {
+export function normalizePath(path: string): string {
   return path.replace(/[\\/]+$/, '')
 }
 
