@@ -267,7 +267,10 @@ function json(res: ServerResponse, status: number, value: unknown): void {
 }
 
 function safeMessage(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).slice(0, 1000)
+  // Connection diagnostics are per-attempt lines (standalone CLI, each
+  // embedded candidate); a 1000-char cap cut them off after the first,
+  // hiding which fallback failed and why.
+  return (error instanceof Error ? error.message : String(error)).slice(0, 4000)
 }
 
 async function probeServer(sshTarget: string, sshArgs: string[]): Promise<{

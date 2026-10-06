@@ -167,7 +167,15 @@ describe('windows Agent Host bootstrap', () => {
 
   it('lists and starts embedded VS Code Servers without GNU find', () => {
     const listing = buildListEmbeddedAgentHostsCommand('windows')
-    expect(decodePowerShell(listing)).toContain('Get-ChildItem -Path "$HOME\\.vscode-server\\cli\\servers"')
+    const decoded = decodePowerShell(listing)
+    expect(decoded).toContain('Get-ChildItem -Path "$HOME\\.vscode-server\\cli\\servers"')
+    // A line beginning with `|` is a PowerShell parse error; the pipeline
+    // must continue from a trailing pipe instead.
+    expect(decoded.split('\n').some(line => line.trimStart().startsWith('|'))).toBe(false)
+    expect(decoded).toContain('-ErrorAction SilentlyContinue |')
+    // Raw stream writes: the success-stream formatter would wrap long server
+    // paths at the hidden console's 120-column buffer width.
+    expect(decoded).toContain('[Console]::Out.WriteLine($_.FullName)')
     const embedded = buildEmbeddedAgentHostCommand('C:\\srv\\code-server.cmd', 'attempt-1', 'windows')
     const script = decodePowerShell(embedded)
     expect(script).toContain("'C:\\srv\\code-server.cmd'")
@@ -181,6 +189,7 @@ describe('windows Agent Host bootstrap', () => {
     expect(script).toContain('Win32_Process')
     expect(script).toContain('Stop-Process')
     expect(script).toContain('server-embedded[/\\\\]dsh\\.remote-1-0')
+    expect(script.split('\n').some(scriptLine => scriptLine.trimStart().startsWith('|'))).toBe(false)
     // The plaintext pattern only ever exists inside the encoded payload, so
     // the reap command's own process line can never match it.
     expect(line).not.toContain('dsh.remote-1-0')

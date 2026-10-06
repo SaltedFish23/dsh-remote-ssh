@@ -107,9 +107,14 @@ export function buildRemoteAgentHostCommand(remoteCodeCommand: string, os: Remot
 /** List installed VS Code Server entrypoints newest-first for compatibility probing. */
 export function buildListEmbeddedAgentHostsCommand(os: RemoteOs = 'posix'): string {
   if (os === 'windows') {
+    // PowerShell continues a pipeline only from a trailing pipe; a leading
+    // `|` is a parse error, which reads here as "no installed code-server".
+    // Paths go through [Console]::Out.WriteLine because the success stream's
+    // formatter wraps lines at the hidden console's buffer width (120), which
+    // splits long server paths into unusable fragments.
     return powerShellCommand([
-      'Get-ChildItem -Path "$HOME\\.vscode-server\\cli\\servers" -Recurse -File -Filter \'code-server*\' -ErrorAction SilentlyContinue',
-      '  | Sort-Object LastWriteTime -Descending | ForEach-Object { $_.FullName }',
+      'Get-ChildItem -Path "$HOME\\.vscode-server\\cli\\servers" -Recurse -File -Filter \'code-server*\' -ErrorAction SilentlyContinue |',
+      '  Sort-Object LastWriteTime -Descending | ForEach-Object { [Console]::Out.WriteLine($_.FullName) }',
     ].join('\n'))
   }
   return 'find "$HOME/.vscode-server/cli/servers" -type f -path \'*/server/bin/code-server\' -perm -u+x -printf \'%T@ %p\\n\' 2>/dev/null | sort -nr | cut -d \' \' -f 2-'
@@ -181,9 +186,11 @@ export function buildReapEmbeddedAgentHostCommand(instanceId: string, os: Remote
   if (os === 'windows') {
     const pattern = `server-embedded[/\\\\]${instanceId.replaceAll('.', '\\.')}`
     return powerShellCommand([
-      'Get-CimInstance Win32_Process -ErrorAction SilentlyContinue',
-      `  | Where-Object { $_.CommandLine -match ${quotePowerShell(pattern)} }`,
-      '  | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }',
+      // Trailing pipes only: a leading `|` would be a PowerShell parse error
+      // and silently leak the remote embedded Agent Host instead of reaping.
+      'Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |',
+      `  Where-Object { $_.CommandLine -match ${quotePowerShell(pattern)} } |`,
+      '  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }',
       'exit 0',
     ].join('\n'))
   }
@@ -1014,7 +1021,14 @@ function abortReason(signal: AbortSignal): Error {
 }
 
 function tailDiagnostic(value: string, maxLength = 2_000): string {
-  const clean = stripAnsi(value).trim()
+  // The Windows OpenSSH default shell serializes its own progress and error
+  // records as `#< CLIXML` XML on stderr — hundreds of bytes of mojibake
+  // noise that would otherwise drown the diagnostic line it wraps.
+  const withoutClixml = stripAnsi(value)
+    .split(/\r?\n/u)
+    .filter(line => !line.startsWith('#< CLIXML') && !/^<\/?(?:Objs|Obj|TN|T|MS|S|I64|PR|AV|AI|Nil|PI|PC|SR|SD)\b/u.test(line.trim()))
+    .join('\n')
+  const clean = withoutClixml.trim()
   return clean.length <= maxLength ? clean : `…${clean.slice(-maxLength)}`
 }
 
