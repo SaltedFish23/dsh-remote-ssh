@@ -281,7 +281,9 @@ async function executeTerminal(
     // echo even when the embedded Agent Host exposes no command-detection
     // actions. The echoed source contains the printable escape spelling, not
     // the RS/US bytes emitted by printf — or, on Windows, only base64.
-    const marker = new TerminalOutputCapture(token, output)
+    // ConPTY strips the control bytes themselves, so the Windows matcher
+    // accepts the bare marker text (see TerminalOutputCapture).
+    const marker = new TerminalOutputCapture(token, output, os)
     client.dispatch(terminalUri, { type: ActionType.TerminalInput, data: `${invocation.input}\r` })
 
     let commandId: string | undefined
@@ -433,54 +435,96 @@ export function buildTerminalInvocation(os: RemoteOs, params: {
   }
 }
 
+/**
+ * Completion tracker for one staged terminal command.
+ *
+ * POSIX remotes echo the typed invocation verbatim, so markers are matched
+ * with their RS/US framing intact (`\x1eDSH:<token>:BEGIN\x1f`): the echoed
+ * source spells the escapes printable (`\036…\037`) and never carries the
+ * control bytes themselves.
+ *
+ * Windows ConPTY re-serializes the screen buffer instead of forwarding
+ * bytes, and RS/US are non-rendering controls — they vanish from the
+ * stream, leaving bare `DSH:<token>:BEGIN` / `DSH:<token>:END:<status>`
+ * text. Bare matching stays collision-free there because the typed
+ * invocation is `powershell -EncodedCommand <base64>` (token only inside
+ * the base64), so the echo cannot contain the plaintext token. Both
+ * spellings treat the framing controls as optional on Windows, in case a
+ * terminal pipeline ever passes them through; the exit status there ends
+ * at the first non-digit instead of requiring the US terminator.
+ */
 class TerminalOutputCapture {
-  readonly begin: string
-  readonly endPrefix: string
+  /** Longest BEGIN spelling, bounding the partial-marker prefix retained between pushes. */
+  private readonly beginBound: number
+  private readonly endBound: number
+  private readonly beginMatcher: RegExp
+  private readonly endMatcher: RegExp
+  private readonly windows: boolean
   started = false
   finished = false
   private pending = ''
 
-  constructor(token: string, private readonly output: TailBuffer) {
-    this.begin = `\x1eDSH:${token}:BEGIN\x1f`
-    this.endPrefix = `\x1eDSH:${token}:END:`
+  constructor(token: string, private readonly output: TailBuffer, os: RemoteOs = 'posix') {
+    const literal = `DSH:${token}`.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    this.windows = os === 'windows'
+    const frame = this.windows ? ['\\x1e?', '(?:\\x1f)?'] as const : ['\\x1e', '\\x1f'] as const
+    this.beginMatcher = new RegExp(`${frame[0]}${literal}:BEGIN${frame[1]}`)
+    this.endMatcher = new RegExp(`${frame[0]}${literal}:END:`)
+    this.beginBound = `\x1eDSH:${token}:BEGIN\x1f`.length - 1
+    this.endBound = `\x1eDSH:${token}:END:`.length - 1
   }
 
   push(data: string): number | undefined {
     if (this.finished) return undefined
     this.pending += data
     if (!this.started) {
-      const at = this.pending.indexOf(this.begin)
-      if (at === -1) {
-        this.pending = this.pending.slice(-Math.max(0, this.begin.length - 1))
+      const begin = this.beginMatcher.exec(this.pending)
+      if (begin === null) {
+        this.pending = this.pending.slice(-Math.max(0, this.beginBound))
         return undefined
       }
       this.started = true
-      this.pending = this.pending.slice(at + this.begin.length)
+      this.pending = this.pending.slice(begin.index + begin[0].length)
     }
 
-    const end = this.pending.indexOf(this.endPrefix)
-    if (end === -1) {
-      const safe = Math.max(0, this.pending.length - (this.endPrefix.length - 1))
+    const end = this.endMatcher.exec(this.pending)
+    if (end === null) {
+      const safe = Math.max(0, this.pending.length - this.endBound)
       if (safe > 0) {
         this.output.append(this.pending.slice(0, safe))
         this.pending = this.pending.slice(safe)
       }
       return undefined
     }
-    this.output.append(this.pending.slice(0, end))
-    const statusStart = end + this.endPrefix.length
-    const terminator = this.pending.indexOf('\x1f', statusStart)
-    if (terminator === -1) {
+    this.output.append(this.pending.slice(0, end.index))
+    const status = this.statusAfter(end.index + end[0].length)
+    if (status === undefined) {
       // Retain the marker and its partial status until the next data action.
-      this.pending = this.pending.slice(end)
+      this.pending = this.pending.slice(end.index)
       return undefined
     }
-    const raw = this.pending.slice(statusStart, terminator)
-    // A Windows wrapper may echo a carriage return before the US terminator.
-    if (!/^\d+\r?$/.test(raw)) throw new Error(`Agent Host terminal emitted an invalid exit marker: ${JSON.stringify(raw)}`)
+    if ('invalid' in status) throw new Error(`Agent Host terminal emitted an invalid exit marker: ${JSON.stringify(status.invalid)}`)
     this.finished = true
     this.pending = ''
-    return Number(raw.replace(/\r$/, ''))
+    return status.exitCode
+  }
+
+  /** Read the exit status after an END marker; `undefined` while it is still partial. */
+  private statusAfter(statusStart: number): { exitCode: number } | { invalid: string } | undefined {
+    if (this.windows) {
+      let index = statusStart
+      while (index < this.pending.length && this.pending[index]! >= '0' && this.pending[index]! <= '9') index += 1
+      if (index >= this.pending.length) return undefined
+      const raw = this.pending.slice(statusStart, index)
+      if (raw.length > 0) return { exitCode: Number(raw) }
+      return { invalid: raw + this.pending[index] }
+    }
+    const terminator = this.pending.indexOf('\x1f', statusStart)
+    if (terminator === -1) return undefined
+    const raw = this.pending.slice(statusStart, terminator)
+    // A Windows wrapper may echo a carriage return before the US terminator.
+    if (!/^\d+\r?$/.test(raw)) return { invalid: raw }
+    return { exitCode: Number(raw.replace(/\r$/, '')) }
   }
 }
 
